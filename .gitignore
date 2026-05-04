@@ -1,0 +1,29 @@
+# Build outputs
+build/
+*.aar
+*.apk
+
+# Flutter/Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+pubspec.lock
+
+# OpenIM Docker data
+openim-docker/components/kafka/data/
+openim-docker/components/mongodb/data/
+openim-docker/components/redis/data/
+openim-docker/components/mnt/data/
+
+# iOS/macOS generated
+ios/Flutter/Generated.xcconfig
+ios/Flutter/ephemeral/
+ios/Runner/GeneratedPluginRegistrant.*
+macos/Flutter/ephemeral/
+macos/Flutter/GeneratedPluginRegistrant.swift
+
+# Logs
+*.log
+
+# Platform symlinks
+**/ephemeral/.plugin_symlinks/
