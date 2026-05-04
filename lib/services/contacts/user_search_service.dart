@@ -1,5 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:wrytte/local_user_service.dart';
 import 'package:flutter/material.dart';
+
 
 class UserSearchService {
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
@@ -43,28 +45,39 @@ class UserSearchService {
           .toList();
 
       final result = <String, String>{};
+      final localService = LocalUserService();
+        final localResult = await localService.getUsers(phones);
+        result.addAll(localResult);
 
-      // ── Single field query for phones ─────────────────────────
-      // Only query 'phone' field — this is what _ensureUserDocument writes
-      for (var i = 0; i < phones.length; i += 10) {
-        final chunk = phones.skip(i).take(10).toList();
-        try {
-          final snapshot = await _firestore
-              .collection('users')
-              .where('phone', whereIn: chunk)
-              .get();
+        final missingPhones = phones
+            .where((p) => !localResult.containsKey(p))
+            .toList();
 
-          for (final doc in snapshot.docs) {
-            final userId = _resolveUserId(doc);
-            final phone = doc.data()['phone']?.toString();
-            if (phone != null && phone.isNotEmpty) {
-              _addLookupKeys(result, phone, userId);
+        for (var i = 0; i < missingPhones.length; i += 10) {
+          final chunk = missingPhones.skip(i).take(10).toList();
+
+          try {
+            final snapshot = await _firestore
+                .collection('users')
+                .where('phone', whereIn: chunk)
+                .get();
+
+            for (final doc in snapshot.docs) {
+              final userId = _resolveUserId(doc);
+              final phone = doc.data()['phone']?.toString();
+
+              if (phone != null && phone.isNotEmpty) {
+                final normalized = _normalizePhone(phone);
+
+                _addLookupKeys(result, normalized, userId);
+
+                await localService.saveUser(normalized, userId);
+              }
             }
+          } catch (e) {
+            debugPrint('Phone chunk query failed: $e');
           }
-        } catch (e) {
-          debugPrint('Phone chunk query failed: $e');
         }
-      }
 
       // ── Single field query for Wrytte IDs ─────────────────────
       // Only query 'uid' field — numeric OpenIM user IDs
