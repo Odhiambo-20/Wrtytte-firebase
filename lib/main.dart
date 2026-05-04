@@ -1,0 +1,299 @@
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:firebase_core/firebase_core.dart';
+
+// ── OpenIM ────────────────────────────────────────────────────────────────────
+import 'package:flutter_openim_sdk/flutter_openim_sdk.dart';
+import 'package:path_provider/path_provider.dart';
+// ─────────────────────────────────────────────────────────────────────────────
+
+import 'package:wrytte/ui/auth/auth_entry_screen.dart';
+import 'package:wrytte/ui/auth/email_verification_page.dart';
+import 'package:wrytte/ui/auth/login_email_verification_page.dart';
+import 'package:wrytte/ui/auth/phone_auth_page.dart';
+import 'package:wrytte/ui/auth/otp_verification_page.dart';
+import 'package:wrytte/ui/auth/add_profile_page.dart';
+import 'package:wrytte/ui/auth/sign_in_page.dart';
+import 'package:wrytte/ui/auth/virtual_number_page.dart';
+
+import 'package:wrytte/ui/screens/home_screen.dart';
+import 'package:wrytte/ui/screens/terms_privacy_page.dart';
+import 'package:wrytte/ui/widgets/theme_wrapper.dart';
+
+import 'package:wrytte/services/call_listener_service.dart';
+import 'package:wrytte/services/auth/auth_service.dart';
+import 'package:wrytte/services/chat/chat_service.dart';
+
+import 'firebase_options.dart';
+import 'core/theme.dart';
+import 'package:flutter_native_splash/flutter_native_splash.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+
+const _systemBarColor = Colors.transparent;
+
+const _openImApiAddr = 'http://34.63.32.143:10002';
+const _openImWsAddr  = 'ws://34.63.32.143:10001';
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  final widgetsBinding = WidgetsFlutterBinding.ensureInitialized();
+  FlutterNativeSplash.preserve(widgetsBinding: widgetsBinding);
+
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+
+  // ── Disable Firestore offline persistence ─────────────────────────────────
+  FirebaseFirestore.instance.settings = const Settings(
+    persistenceEnabled: false,
+  );
+
+  // ── Initialise OpenIM SDK ──────────────────────────────────────────────────
+  _initOpenIM(); // fire-and-forget — does not block runApp()
+  // ──────────────────────────────────────────────────────────────────────────
+
+  await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+
+  SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+
+  SystemChrome.setSystemUIOverlayStyle(
+    const SystemUiOverlayStyle(
+      statusBarColor: _systemBarColor,
+      systemNavigationBarColor: _systemBarColor,
+      systemNavigationBarDividerColor: _systemBarColor,
+      statusBarIconBrightness: Brightness.light,
+      systemNavigationBarIconBrightness: Brightness.light,
+      systemNavigationBarContrastEnforced: false,
+    ),
+  );
+
+  runApp(const WrytteApp());
+}
+
+// ── OpenIM SDK boot ────────────────────────────────────────────────────────────
+Future<void> _initOpenIM() async {
+  final dir = await getApplicationDocumentsDirectory();
+
+  final success = await OpenIM.iMManager.initSDK(
+    platformID: IMPlatform.android,
+    apiAddr: _openImApiAddr,
+    wsAddr: _openImWsAddr,
+    dataDir: dir.path,
+    logLevel: 6,
+    listener: OnConnectListener(
+      onConnectSuccess: () {
+        debugPrint('[OpenIM] Connected');
+      },
+      onConnecting: () {
+        debugPrint('[OpenIM] Connecting...');
+      },
+      onConnectFailed: (int? code, String? msg) {
+        debugPrint('[OpenIM] Connection failed — $code: $msg');
+      },
+      onKickedOffline: () {
+        debugPrint('[OpenIM] Kicked offline');
+      },
+      onUserTokenExpired: () {
+        debugPrint('[OpenIM] Token expired');
+      },
+    ),
+  );
+
+  debugPrint('[OpenIM] SDK init: ${success ? "OK" : "FAILED — check server address"}');
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+class WrytteApp extends StatelessWidget {
+  const WrytteApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Wrytte',
+      debugShowCheckedModeBanner: false,
+      theme: WrytteTheme.lightTheme,
+      home: const ThemeWrapper(child: AuthWrapper()),
+      routes: {
+        '/auth_entry_screen':
+            (context) => const ThemeWrapper(child: AuthEntryScreen()),
+
+        '/phone_auth': (context) => const ThemeWrapper(child: PhoneAuthPage()),
+
+        '/virtual_phone':
+            (context) => const ThemeWrapper(child: VirtualNumberPage()),
+
+        '/sign_in': (context) => const ThemeWrapper(child: SignInPage()),
+
+        '/otp_verification': (context) {
+          final args =
+              ModalRoute.of(context)?.settings.arguments
+                  as Map<String, dynamic>?;
+          return ThemeWrapper(
+            child: OtpVerificationPage(
+              phoneNumber: args?['phoneNumber'] ?? '',
+              isSignInFlow: args?['isSignInFlow'] ?? false,
+            ),
+          );
+        },
+
+        '/email_verification': (context) {
+          final args =
+              ModalRoute.of(context)?.settings.arguments
+                  as Map<String, dynamic>?;
+          return ThemeWrapper(
+            child: EmailVerificationPage(
+              email: args?['email'] ?? '',
+              virtualNumber: args?['virtualNumber'] ?? '',
+            ),
+          );
+        },
+
+        '/login_otp_page': (context) => const ThemeWrapper(child: SignInPage()),
+
+        "/login_email_verification_page": (context) {
+          final args =
+              ModalRoute.of(context)?.settings.arguments
+                  as Map<String, dynamic>?;
+          return ThemeWrapper(
+            child: LoginEmailVerificationPage(
+              email: args?['email'] ?? '',
+              virtualNumber: args?['wrytteId'] ?? '',
+            ),
+          );
+        },
+
+        '/add_profile':
+            (context) => const ThemeWrapper(child: AddProfilePage()),
+
+        '/home': (context) => const ThemeWrapper(child: AuthWrapper()),
+
+        'terms_privacy':
+            (context) => const ThemeWrapper(child: TermsPrivacyPage()),
+      },
+    );
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  AuthWrapper
+//
+//  FIX: Previously checked FirebaseAuth.instance.currentUser to decide
+//  whether to show HomeScreen or AuthEntryScreen. Since the app now uses
+//  OpenIM + FlutterSecureStorage for auth (not Firebase phone auth),
+//  firebaseUser was always null on relaunch → always showed signup screen.
+//
+//  Now checks AuthService.instance.getCurrentUser() (secure storage) instead.
+//  This is async so we show a brief black splash while reading storage
+//  (~50ms on device — imperceptible to the user).
+// ══════════════════════════════════════════════════════════════════════════════
+class AuthWrapper extends StatefulWidget {
+  const AuthWrapper({super.key});
+
+  @override
+  State<AuthWrapper> createState() => _AuthWrapperState();
+}
+
+class _AuthWrapperState extends State<AuthWrapper> {
+  bool _checking = true;   // true while reading secure storage
+  bool _isLoggedIn = false;
+  String? _currentUserId;
+
+  final CallListenerService _callListener = CallListenerService();
+  final ChatService _chatService = ChatService();
+
+  @override
+  void initState() {
+    super.initState();
+    _checkSession();
+  }
+
+  // ---------------------------------------------------------------------------
+  //  Read the persisted session from FlutterSecureStorage.
+  //  Takes ~50ms on device. Shows a plain black screen while waiting,
+  //  which is indistinguishable from the native splash.
+  // ---------------------------------------------------------------------------
+  Future<void> _checkSession() async {
+    try {
+      final user = await AuthService.instance.getCurrentUser();
+
+      final loggedIn = user != null && user.isAuthenticated && !user.isExpired;
+      final userId   = user?.userId;
+
+      if (mounted) {
+        setState(() {
+          _isLoggedIn    = loggedIn;
+          _currentUserId = userId;
+          _checking      = false;
+        });
+      }
+
+      FlutterNativeSplash.remove();
+
+      if (loggedIn && userId != null && userId.isNotEmpty) {
+        _initServicesInBackground(
+          userId:   userId,
+          nickname: user?.username ?? userId,
+        );
+      }
+    } catch (e) {
+      debugPrint('[AuthWrapper] Session check error: $e');
+      if (mounted) {
+        setState(() {
+          _isLoggedIn = false;
+          _checking   = false;
+        });
+      }
+      FlutterNativeSplash.remove();
+    }
+  }
+
+  @override
+  void dispose() {
+    _callListener.stopListening();
+    _chatService.disconnect();
+    super.dispose();
+  }
+
+  Future<void> _initServicesInBackground({
+    required String userId,
+    String nickname = '',
+    String faceUrl  = '',
+  }) async {
+    try {
+      await _chatService.connect();
+    } catch (e) {
+      debugPrint('[AuthWrapper] ChatService connection error: $e');
+    }
+
+    // Re-connect OpenIM SDK using the saved imToken
+    try {
+      final imToken = await AuthService.instance.getOpenImToken();
+      await AuthService.instance.loginToOpenIM(
+        userId:   userId,
+        nickname: nickname.isNotEmpty ? nickname : userId,
+        faceUrl:  faceUrl,
+        imToken:  imToken ?? '',
+      );
+    } catch (e) {
+      debugPrint('[AuthWrapper] OpenIM login error: $e');
+    }
+
+    if (mounted) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _callListener.startListening(context);
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // Brief loading state while secure storage is read (~50ms)
+    if (_checking) {
+      return const Scaffold(
+        backgroundColor: Color(0xFF08090B),
+        body: SizedBox.shrink(), // plain black — matches splash
+      );
+    }
+
+    if (!_isLoggedIn) return const AuthEntryScreen();
+    return HomeScreen(currentUserId: _currentUserId!);
+  }
+}

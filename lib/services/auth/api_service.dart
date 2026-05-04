@@ -1,0 +1,148 @@
+import 'dart:convert';
+import 'dart:async';
+import 'package:http/http.dart' as http;
+import 'package:flutter/foundation.dart';
+
+class ApiService {
+  static const String baseUrl = "https://wryttedev.azurewebsites.net";
+
+  // POST (x-www-form-urlencoded)
+
+  static Future<dynamic> post(
+    String path, {
+    Map<String, dynamic>? body,
+    Map<String, dynamic>? queryParameters,
+    String? token,
+  }) async {
+    final uri = Uri.parse(
+      "$baseUrl$path",
+    ).replace(queryParameters: queryParameters);
+
+    final headers = {
+      "Content-Type": "application/x-www-form-urlencoded",
+      if (token != null) "Authorization": "Bearer $token",
+    };
+
+    debugPrint("➡️ POST $uri");
+    debugPrint("📦 BODY: $body");
+
+    final response = await http
+        .post(
+          uri,
+          headers: headers,
+          body: body?.map((k, v) => MapEntry(k, v?.toString() ?? "")),
+        )
+        .timeout(const Duration(seconds: 20));
+
+    debugPrint("⬅️ STATUS: ${response.statusCode}");
+    debugPrint("⬅️ RESPONSE: ${response.body}");
+
+    if (response.statusCode >= 200 && response.statusCode < 300) {
+      return _safeDecode(response.body);
+    }
+
+    throw ApiException(response.statusCode, response.body);
+  }
+
+  // POST (multipart/form-data)
+
+  static Future<dynamic> postMultipart(
+    String path,
+    Map<String, String> fields, {
+    String? token,
+  }) async {
+    final uri = Uri.parse("$baseUrl$path");
+
+    final request = http.MultipartRequest("POST", uri);
+    request.fields.addAll(fields);
+
+    if (token != null) {
+      request.headers["Authorization"] = "Bearer $token";
+    }
+
+    debugPrint("➡️ POST MULTIPART $uri");
+    debugPrint("📦 FIELDS: $fields");
+
+    final streamedResponse = await request.send().timeout(
+      const Duration(seconds: 20),
+    );
+
+    final response = await http.Response.fromStream(streamedResponse);
+
+    debugPrint("⬅️ STATUS: ${response.statusCode}");
+    debugPrint("⬅️ RESPONSE: ${response.body}");
+
+    if (response.statusCode >= 200 && response.statusCode < 300) {
+      return _safeDecode(response.body);
+    }
+
+    throw ApiException(response.statusCode, response.body);
+  }
+
+  // GET
+
+  static Future<dynamic> get(
+    String path, {
+    String? token,
+    Map<String, dynamic>? queryParameters,
+  }) async {
+    final uri = Uri.parse("$baseUrl$path").replace(
+      queryParameters: queryParameters?.map(
+        (k, v) => MapEntry(k, v?.toString() ?? ""),
+      ),
+    );
+
+    final headers = {
+      "Content-Type": "application/x-www-form-urlencoded",
+      if (token != null) "Authorization": "Bearer $token",
+    };
+
+    debugPrint("➡️ GET $uri");
+
+    final response = await http
+        .get(uri, headers: headers)
+        .timeout(const Duration(seconds: 20));
+
+    debugPrint("⬅️ STATUS: ${response.statusCode}");
+    debugPrint("⬅️ RESPONSE: ${response.body}");
+
+    if (response.statusCode >= 200 && response.statusCode < 300) {
+      return _safeDecode(response.body);
+    }
+
+    throw ApiException(response.statusCode, response.body);
+  }
+
+  // SAFE JSON DECODER
+
+  static dynamic _safeDecode(String body) {
+    if (body.isEmpty) return null;
+
+    try {
+      final decoded = jsonDecode(body);
+
+      if (decoded is int || decoded is bool || decoded is String) {
+        debugPrint("⚠️ Primitive JSON received: $decoded");
+        return {"value": decoded};
+      }
+
+      return decoded;
+    } catch (e) {
+      debugPrint("⚠️ JSON decode error: $e");
+      debugPrint("⚠️ Non-JSON response received, treating as success");
+      return null;
+    }
+  }
+}
+
+// API Exception
+
+class ApiException implements Exception {
+  final int statusCode;
+  final String message;
+
+  ApiException(this.statusCode, this.message);
+
+  @override
+  String toString() => "API Error [$statusCode]: $message";
+}

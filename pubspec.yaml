@@ -1,0 +1,127 @@
+name: wrytte
+description: "A new Flutter project."
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.7.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+  cached_network_image: ^3.4.1
+  flutter_statusbarcolor_ns: ^0.6.0
+  font_awesome_flutter: ^10.9.0
+  firebase_core: ^4.0.0
+  firebase_auth: ^6.0.1
+  cloud_firestore: ^6.0.0
+  firebase_storage: ^13.0.0
+  flutter_svg: ^2.2.0
+  flutter_slidable: ^4.0.3
+  image_picker: ^1.2.0
+  url_launcher: ^6.3.2
+  clipboard: ^2.0.2
+  flutter_contacts: ^1.1.9+2
+  permission_handler: ^12.0.1
+  flutter_libphonenumber: ^2.5.1
+  libphonenumber_plugin: ^0.3.3
+  device_info_plus: ^9.0.3
+  audioplayers: ^6.5.1
+  path_provider: ^2.1.5
+  file: ^7.0.1
+  flutter_sound: ^9.28.0
+  flutter_webrtc: ^1.2.1
+  camera: ^0.11.3
+  rxdart: ^0.28.0
+  photo_manager: ^3.8.3
+  photo_manager_image_provider: ^2.2.0
+  http: ^1.6.0
+  flutter_secure_storage: ^10.0.0
+  web_socket_channel: ^3.0.3
+  equatable: ^2.0.8
+  shared_preferences: ^2.5.4
+  connectivity_plus: ^6.0.0 
+  flutter_native_splash: ^2.4.7
+  sqflite: ^2.4.2
+  path: ^1.9.1
+
+  # ── OpenIM Messaging SDK ──────────────────────────────────────
+  flutter_openim_sdk: ^3.8.3+hotfix.12
+  flutter_ringtone_player: ^4.0.0+4
+
+dev_dependencies:
+  flutter_launcher_icons: ^0.14.4
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+# ── App icon ──────────────────────────────────────────────────────────────────
+# Run: dart run flutter_launcher_icons
+flutter_icons:
+  android: true
+  ios: true
+  image_path: "assets/images/wrytte_logo.png"
+  # Android adaptive icon — logo centered on the dark background
+  adaptive_icon_background: "#08090B"
+  adaptive_icon_foreground: "assets/images/wrytte_logo.png"
+  # Remove the white background on iOS
+  remove_alpha_ios: true
+  # Web (optional — safe to leave in)
+  web:
+    generate: false
+
+# ── Splash screen ─────────────────────────────────────────────────────────────
+# Run: dart run flutter_native_splash:create
+flutter_native_splash:
+  # Background colour matching your app dark background
+  color: "#08090B"
+  # The logo shown centred on the splash
+  image: assets/images/wrytte_logo.png
+  # Keep the splash until Flutter is ready (removes white flash)
+  fullscreen: true
+  android_12:
+    # Android 12+ uses a dedicated splash API
+    color: "#08090B"
+    image: assets/images/wrytte_logo.png
+    icon_background_color: "#08090B"
+  # Make both system bars transparent on the splash too
+  android_gravity: center
+  ios_content_mode: center
+
+# ── Flutter ───────────────────────────────────────────────────────────────────
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/images/wrytte_logo.png
+    - assets/images/default_avatar.jpg
+    - assets/images/video image1.jpg
+    - assets/images/video image2.jpg
+    - assets/images/video image3.jpg
+    - assets/images/video image4.jpg
+    - assets/images/video image5.jpg
+    - assets/images/chat_wallpaper.jpg
+    - assets/svg/stories_icon.svg
+    - assets/svg/comment_icon.svg
+    - assets/svg/chat_icon.svg
+    - assets/svg/phonebook.svg
+    - assets/svg/phone_book.png
+    - assets/svg/chat_filled.svg
+    - assets/svg/reward_icon.svg
+    - assets/svg/shop_icon.svg
+    - assets/svg/posts_icon.png
+    - assets/svg/coin_icon.png
+    - assets/svg/express_message.svg
+    - assets/svg/gif_icon.svg
+    - assets/svg/reply.svg
+    - assets/svg/forward.svg
+
+  fonts:
+    - family: Roboto
+      fonts:
+        - asset: assets/fonts/Roboto-Regular.ttf
+        - asset: assets/fonts/Roboto-Bold.ttf
+          weight: 800

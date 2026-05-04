@@ -1,0 +1,7 @@
+[
+  {
+    "origin": ["https://wrytte.com", "https://www.wrytte.com"],
+    "method": ["GET", "PUT", "POST", "DELETE", "HEAD"],
+    "maxAgeSeconds": 3600
+  }
+]

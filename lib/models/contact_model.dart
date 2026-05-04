@@ -1,0 +1,85 @@
+class Contact {
+  final String? displayName;
+  final List<String> phones;
+  final String? avatarUrl;
+  final bool isOnWrytte;
+  final String? wrytteUserId;
+  final String? databaseName;
+  final bool isRecent;
+
+  Contact({
+    required this.displayName,
+    required this.phones,
+    this.avatarUrl,
+    this.isOnWrytte = false,
+    this.wrytteUserId,
+    this.databaseName,
+    this.isRecent = false,
+  });
+
+  String get formattedName => displayName ?? 'Unknown';
+  String get primaryPhone => phones.isNotEmpty ? phones.first : '';
+
+  // for easier updates
+  Contact copyWith({
+    String? displayName,
+    List<String>? phones,
+    String? avatarUrl,
+    bool? isOnWrytte,
+    String? wrytteUserId,
+    String? databaseName,
+    bool? isRecent,
+  }) {
+    return Contact(
+      displayName: displayName ?? this.displayName,
+      phones: phones ?? this.phones,
+      avatarUrl: avatarUrl ?? this.avatarUrl,
+      isOnWrytte: isOnWrytte ?? this.isOnWrytte,
+      wrytteUserId: wrytteUserId ?? this.wrytteUserId,
+      databaseName: databaseName ?? this.databaseName,
+      isRecent: isRecent ?? this.isRecent,
+    );
+  }
+
+  // Factory method to create a Contact with isRecent flag
+  Contact withRecent(bool recent) {
+    return copyWith(isRecent: recent);
+  }
+
+  // Convert to Map
+  Map<String, dynamic> toMap() {
+    return {
+      'displayName': displayName,
+      'phones': phones,
+      'avatarUrl': avatarUrl,
+      'isOnWrytte': isOnWrytte,
+      'wrytteUserId': wrytteUserId,
+      'databaseName': databaseName,
+      'isRecent': isRecent,
+    };
+  }
+
+  // Factory method to create from Map
+  factory Contact.fromMap(Map<String, dynamic> map) {
+    return Contact(
+      displayName: map['displayName'],
+      phones: List<String>.from(map['phones'] ?? []),
+      avatarUrl: map['avatarUrl'],
+      isOnWrytte: map['isOnWrytte'] ?? false,
+      wrytteUserId: map['wrytteUserId'],
+      databaseName: map['databaseName'],
+      isRecent: map['isRecent'] ?? false,
+    );
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is Contact &&
+          runtimeType == other.runtimeType &&
+          displayName == other.displayName &&
+          primaryPhone == other.primaryPhone;
+
+  @override
+  int get hashCode => displayName.hashCode ^ primaryPhone.hashCode;
+}

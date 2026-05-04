@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+	<dict>
+		<key>CFBundleDevelopmentRegion</key>
+		<string>$(DEVELOPMENT_LANGUAGE)</string>
+		<key>CFBundleDisplayName</key>
+		<string>Wrytte</string>
+		<key>CFBundleExecutable</key>
+		<string>$(EXECUTABLE_NAME)</string>
+		<key>CFBundleIdentifier</key>
+		<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+		<key>CFBundleInfoDictionaryVersion</key>
+		<string>6.0</string>
+		<key>CFBundleName</key>
+		<string>wrytte</string>
+		<key>CFBundlePackageType</key>
+		<string>APPL</string>
+		<key>CFBundleShortVersionString</key>
+		<string>$(FLUTTER_BUILD_NAME)</string>
+		<key>CFBundleSignature</key>
+		<string>????</string>
+		<key>CFBundleVersion</key>
+		<string>$(FLUTTER_BUILD_NUMBER)</string>
+		<key>LSRequiresIPhoneOS</key>
+		<true/>
+		<key>UILaunchStoryboardName</key>
+		<string>LaunchScreen</string>
+		<key>UIMainStoryboardFile</key>
+		<string>Main</string>
+		<key>UISupportedInterfaceOrientations</key>
+		<array>
+			<string>UIInterfaceOrientationPortrait</string>
+			<string>UIInterfaceOrientationLandscapeLeft</string>
+			<string>UIInterfaceOrientationLandscapeRight</string>
+		</array>
+		<key>UISupportedInterfaceOrientations~ipad</key>
+		<array>
+			<string>UIInterfaceOrientationPortrait</string>
+			<string>UIInterfaceOrientationPortraitUpsideDown</string>
+			<string>UIInterfaceOrientationLandscapeLeft</string>
+			<string>UIInterfaceOrientationLandscapeRight</string>
+		</array>
+		<key>CADisableMinimumFrameDurationOnPhone</key>
+		<true/>
+		<key>UIApplicationSupportsIndirectInputEvents</key>
+		<true/>
+		<!-- ===== CONTACTS PERMISSION ===== -->
+		<key>NSContactsUsageDescription</key>
+		<string>This app needs contacts permission to find your friends on Wrytte</string>
+		<!-- ===== CAMERA PERMISSIONS ===== -->
+		<key>NSCameraUsageDescription</key>
+		<string>This app needs camera access to take photos and videos for your profile and chats</string>
+		<!-- ===== PHOTO LIBRARY PERMISSIONS ===== -->
+		<key>NSPhotoLibraryUsageDescription</key>
+		<string>This app needs photo library access to upload images for your profile and chats</string>
+		<!-- ===== MICROPHONE PERMISSIONS ===== -->
+		<key>NSMicrophoneUsageDescription</key>
+		<string>This app needs microphone access for voice messages and video calls</string>
+		<!-- ===== LOCATION PERMISSIONS (Optional) ===== -->
+		<key>NSLocationWhenInUseUsageDescription</key>
+		<string>This app needs location access to show nearby contacts and share location in chats</string>
+		<!-- ===== BACKGROUND MODES ===== -->
+		<key>UIBackgroundModes</key>
+		<array>
+			<string>audio</string>
+			<string>remote-notification</string>
+		</array>
+		<!-- ===== PUSH NOTIFICATIONS ===== -->
+		<key>FirebaseAppDelegateProxyEnabled</key>
+		<false/>
+		<!-- ===== SUPPORTED URL SCHEMES ===== -->
+		<key>CFBundleURLTypes</key>
+		<array>
+			<dict>
+				<key>CFBundleTypeRole</key>
+				<string>Editor</string>
+				<key>CFBundleURLSchemes</key>
+				<array>
+					<string>googleusercontent.com</string>
+				</array>
+			</dict>
+		</array>
+		<!-- ===== PRIVACY SETTINGS ===== -->
+		<key>ITSAppUsesNonExemptEncryption</key>
+		<false/>
+		<!-- ===== IOS CONFIGURATIONS ===== -->
+		<key>UIViewControllerBasedStatusBarAppearance</key>
+		<false/>
+		<key>UIStatusBarStyle</key>
+		<string>UIStatusBarStyleLightContent</string>
+		<!-- ===== FONTS SUPPORT ===== -->
+		<key>UIAppFonts</key>
+		<array>
+			<string>Roboto.ttf</string>
+			<string>Roboto-Bold.ttf</string>
+		</array>
+		<key>UIStatusBarHidden</key>
+		<true/>
+	</dict>
+</plist>

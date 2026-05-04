@@ -1,0 +1,2 @@
+C:/Users/User Mike/Desktop/Wrytte/wrytte/android/app/.cxx/Debug/2m6o6i2l/arm64-v8a/CMakeFiles/edit_cache.dir
+C:/Users/User Mike/Desktop/Wrytte/wrytte/android/app/.cxx/Debug/2m6o6i2l/arm64-v8a/CMakeFiles/rebuild_cache.dir
