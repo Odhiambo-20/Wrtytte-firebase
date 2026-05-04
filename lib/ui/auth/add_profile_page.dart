@@ -20,9 +20,20 @@ class _AddProfilePageState extends State<AddProfilePage> {
   void initState() {
     super.initState();
     _nicknameController.addListener(_validate);
+      _checkExistingProfile();
   }
 
- 
+  Future<void> _checkExistingProfile() async {
+    final uid = await AuthService.instance.getCurrentUserId();
+    if (uid == null || uid.isEmpty) return;
+
+    final doc = await FirebaseFirestore.instance.collection('users').doc(uid).get();
+    final name = doc.data()?['name'] as String?;
+
+    if (name != null && name.trim().length >= 2) {
+      await _goHome();
+    }
+  }
 
   void _validate() {
     final valid = _nicknameController.text.trim().length >= 2;
