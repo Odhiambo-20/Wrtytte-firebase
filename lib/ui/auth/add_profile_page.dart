@@ -22,10 +22,14 @@ class _AddProfilePageState extends State<AddProfilePage> {
     _nicknameController.addListener(_validate);
   }
 
+ 
+
   void _validate() {
-    setState(() {
-      _isValid = _nicknameController.text.trim().length >= 2;
-    });
+    final valid = _nicknameController.text.trim().length >= 2;
+    setState(() => _isValid = valid);
+    if (valid && !_isSaving) {
+      _saveAndGoHome();
+    }
   }
 
   Future<void> _goHome() async {
@@ -79,32 +83,10 @@ class _AddProfilePageState extends State<AddProfilePage> {
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
               Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   TextButton(
-                    onPressed: _isSaving ? null : _goHome,  // ✅ Skip → HomeScreen
-                    child: const Text(
-                      "Skip",
-                      style: TextStyle(color: Colors.grey),
-                    ),
-                  ),
-                  TextButton(
-                    onPressed: (_isValid && !_isSaving) ? _saveAndGoHome : null,
-                    child: _isSaving
-                        ? const SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : Text(
-                            "Done",
-                            style: TextStyle(
-                              color: _isValid
-                                  ? const Color(0xFF2AABEE)
-                                  : Colors.grey,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
+                    onPressed: _isSaving ? null : _goHome,
+                    child: const Text("Skip", style: TextStyle(color: Colors.grey)),
                   ),
                 ],
               ),
