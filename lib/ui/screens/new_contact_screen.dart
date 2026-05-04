@@ -8,6 +8,7 @@ import 'package:wrytte/services/contacts/contact_service.dart';
 import 'package:wrytte/services/contacts/user_search_service.dart';
 import 'package:wrytte/ui/screens/Country%20id%20picker%20page.dart';
 import 'package:wrytte/utils/countries_id.dart';
+import 'package:wrytte/ui/screens/chats/chat_screen.dart';
 
 // ─────────────────────────────────────────────────────────────────
 // Colours
@@ -264,7 +265,7 @@ class _NewContactPageState extends State<NewContactPage> {
     });
 
     try {
-      final selfId = await AuthService.instance.getCurrentUserId();
+      final String selfId = await AuthService.instance.getCurrentUserId() ?? '';
       debugPrint('🧑 selfUserId in _save: $selfId');
       final saved = await _contactService.saveManualContact(
         firstName: _firstNameCtrl.text.trim(),
@@ -273,15 +274,31 @@ class _NewContactPageState extends State<NewContactPage> {
         wrytteUserId: _resolvedUserId,
         syncToPhone: _syncToPhone,
         token: await AuthService.instance.getOpenImToken() ?? widget.token,
-        //selfUserId: await AuthService.instance.getCurrentUserId(),
         selfUserId: selfId,
       );
 
       if (!mounted) return;
 
-      // Success: pop back and return the saved contact so the caller
-      // can open a chat window or refresh the contacts list.
-      Navigator.pop(context, saved);
+      final receiverId = saved.wrytteUserId ?? '';
+      final conversationId = ([selfId, receiverId]..sort()).join('_');
+
+      if (saved.isOnWrytte && receiverId.isNotEmpty) {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (_) => ChatScreen(
+              conversationId: conversationId,
+              receiverId: receiverId,
+              currentUserId: selfId,
+              title: saved.formattedName,
+              avatarUrl: saved.avatarUrl,
+            ),
+          ),
+        );
+      } else {
+        // Contact not on Wrytte — just go back
+        Navigator.pop(context, saved);
+      }
     } catch (e) {
       debugPrint('Save contact error: $e');
       if (!mounted) return;
