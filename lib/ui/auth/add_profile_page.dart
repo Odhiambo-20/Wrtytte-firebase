@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:wrytte/services/auth/auth_service.dart';
@@ -15,31 +16,44 @@ class _AddProfilePageState extends State<AddProfilePage> {
   bool _syncContacts = true;
   bool _isValid = false;
   bool _isSaving = false;
+  bool _isChecking = true;
+  Timer? _debounce;
 
   @override
   void initState() {
     super.initState();
     _nicknameController.addListener(_validate);
-      _checkExistingProfile();
+    _checkExistingProfile();
   }
 
   Future<void> _checkExistingProfile() async {
     final uid = await AuthService.instance.getCurrentUserId();
-    if (uid == null || uid.isEmpty) return;
+    if (uid == null || uid.isEmpty) {
+      if (mounted) setState(() => _isChecking = false);
+      return;
+    }
 
     final doc = await FirebaseFirestore.instance.collection('users').doc(uid).get();
     final name = doc.data()?['name'] as String?;
 
     if (name != null && name.trim().length >= 2) {
       await _goHome();
+    } else {
+      if (mounted) setState(() => _isChecking = false);
     }
   }
 
   void _validate() {
     final valid = _nicknameController.text.trim().length >= 2;
     setState(() => _isValid = valid);
+
     if (valid && !_isSaving) {
-      _saveAndGoHome();
+      _debounce?.cancel();
+      _debounce = Timer(const Duration(seconds: 2), () {
+        if (_isValid && !_isSaving) _saveAndGoHome();
+      });
+    } else {
+      _debounce?.cancel();
     }
   }
 
@@ -79,12 +93,20 @@ class _AddProfilePageState extends State<AddProfilePage> {
 
   @override
   void dispose() {
+    _debounce?.cancel();
     _nicknameController.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    if (_isChecking) {
+      return const Scaffold(
+        backgroundColor: Color(0xFF08090B),
+        body: SizedBox.shrink(),
+      );
+    }
+
     return Scaffold(
       backgroundColor: const Color(0xFF08090B),
       body: SafeArea(
@@ -97,7 +119,10 @@ class _AddProfilePageState extends State<AddProfilePage> {
                 children: [
                   TextButton(
                     onPressed: _isSaving ? null : _goHome,
-                    child: const Text("Skip", style: TextStyle(color: Colors.grey)),
+                    child: const Text(
+                      "Skip",
+                      style: TextStyle(color: Colors.grey),
+                    ),
                   ),
                 ],
               ),
