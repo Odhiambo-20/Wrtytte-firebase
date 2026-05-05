@@ -339,7 +339,6 @@ class ContactService {
         'operationID': DateTime.now().millisecondsSinceEpoch.toString(),
       },
       body: jsonEncode({
-        'fromUserID': selfUserId,
         'toUserID': friendUserId,
         'reqMsg': 'Hello! I would like to add you on Wrytte.',
         'ex': '',
