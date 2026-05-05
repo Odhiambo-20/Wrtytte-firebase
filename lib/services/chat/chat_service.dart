@@ -1,15 +1,33 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
-
-// ── Hide OpenIM's MessageStatus so it never clashes with our own enum ─────────
 import 'package:flutter_openim_sdk/flutter_openim_sdk.dart'
     hide MessageStatus;
-// ─────────────────────────────────────────────────────────────────────────────
 
-import 'package:wrytte/models/chat_models/chat_message.dart';
 import 'package:wrytte/models/chat_models/chat_conversation.dart';
+import 'package:wrytte/models/chat_models/chat_message.dart';
 import 'package:wrytte/services/auth/auth_service.dart';
+
+// =============================================================================
+//  ChatService
+//
+//  Single source of truth for all messaging in Wrytte.
+//  All reads and writes go through the OpenIM SDK which manages its own
+//  SQLite cache (local_chat_logs, local_conversations tables).
+//
+//  Firebase is NOT used here. FirebaseChatService can remain for legacy data
+//  migration but is no longer called for any live messaging.
+//
+//  Public API:
+//    connect()                    — register listeners, load initial data
+//    sendMessage(msg)             — send a text message via OpenIM
+//    sendVoiceMessage(...)        — send a voice note via OpenIM
+//    fetchMessageHistory(...)     — load older messages (paginated)
+//    fetchConversations()         — refresh conversation list from OpenIM cache
+//    markConversationAsRead(id)   — mark all messages in conv as read
+//    getConversationMessages(id)  — synchronous in-memory cache read
+//    disconnect()                 — clean up listeners
+// =============================================================================
 
 class ChatService {
   // ── Singleton ──────────────────────────────────────────────────────────────
@@ -20,13 +38,13 @@ class ChatService {
   final AuthService _authService = AuthService.instance;
 
   // ── Stream controllers ─────────────────────────────────────────────────────
-  final StreamController<ChatMessage> _messageController =
+  final _messageController =
       StreamController<ChatMessage>.broadcast();
-  final StreamController<String> _errorController =
+  final _errorController =
       StreamController<String>.broadcast();
-  final StreamController<bool> _connectionController =
+  final _connectionController =
       StreamController<bool>.broadcast();
-  final StreamController<List<ChatConversation>> _conversationsController =
+  final _conversationsController =
       StreamController<List<ChatConversation>>.broadcast();
 
   // ── Public streams ─────────────────────────────────────────────────────────
@@ -37,18 +55,20 @@ class ChatService {
 
   // ── State ──────────────────────────────────────────────────────────────────
   String? _currentUserId;
-  bool _initialized = false;
-  bool _isConnected = false;
+  bool    _initialized = false;
+  bool    _isConnected = false;
 
-  // ── In-memory cache ────────────────────────────────────────────────────────
+  String? get currentUserId => _currentUserId;
+
+  // ── In-memory cache (mirrors OpenIM's SQLite for fast sync reads) ──────────
   final Map<String, ChatConversation>  _conversationsMap = {};
   final Map<String, List<ChatMessage>> _messagesCache    = {};
 
-
-  // ══════════════════════════════════════════════════════════════════════════
+  // ===========================================================================
   //  CONNECT
-  // ══════════════════════════════════════════════════════════════════════════
-
+  //  Registers OpenIM listeners and loads the initial conversation list from
+  //  OpenIM's local SQLite cache (instant — no network needed).
+  // ===========================================================================
   Future<void> connect() async {
     if (_initialized) return;
 
@@ -57,39 +77,33 @@ class ChatService {
       _currentUserId = user?.userId ?? OpenIM.iMManager.userID;
 
       if (_currentUserId == null || _currentUserId!.isEmpty) {
-        _errorController.add("User not authenticated");
+        _errorController.add('User not authenticated');
         return;
       }
 
-      // ── Register OpenIM message listener ───────────────────────────────────
-      //
-      // SDK 3.8.3 OnAdvancedMsgListener constructor parameters (verified):
-      //   onRecvNewMessage          → (Message msg)
-      //   onNewRecvMessageRevoked   → (RevokedInfo info)
-      //   onMsgDeleted              → (Message msg)
-      //   onRecvC2CReadReceipt      → (List<ReadReceiptInfo> list)
-      //   onRecvOfflineNewMessage   → (Message msg)
-      //   onRecvOnlineOnlyMessage   → (Message msg)
+      // ── 1. Message listener ──────────────────────────────────────────────
       OpenIM.iMManager.messageManager.setAdvancedMsgListener(
         OnAdvancedMsgListener(
           onRecvNewMessage: (Message msg) {
-            final chatMsg = _openImMessageToChatMessage(msg);
+            debugPrint('[ChatService] New message: ${msg.clientMsgID}');
+            final chatMsg = _toChat(msg);
             if (chatMsg != null) {
+              // OpenIM already persisted this to its SQLite — just update UI
+              _cacheMessage(chatMsg);
               _messageController.add(chatMsg);
-              _updateConversationCache(chatMsg);
             }
           },
           onNewRecvMessageRevoked: (RevokedInfo info) {
-            final revokedId = info.clientMsgID ?? '';
+            final id = info.clientMsgID ?? '';
             for (final msgs in _messagesCache.values) {
-              msgs.removeWhere((m) => m.id == revokedId);
+              msgs.removeWhere((m) => m.id == id);
             }
             _emitConversations();
           },
           onMsgDeleted: (Message msg) {
-            final deletedId = msg.clientMsgID ?? '';
+            final id = msg.clientMsgID ?? '';
             for (final msgs in _messagesCache.values) {
-              msgs.removeWhere((m) => m.id == deletedId);
+              msgs.removeWhere((m) => m.id == id);
             }
             _emitConversations();
           },
@@ -108,56 +122,57 @@ class ChatService {
         ),
       );
 
-      // ── Register conversation listener ─────────────────────────────────────
+      // ── 2. Conversation listener ─────────────────────────────────────────
       await OpenIM.iMManager.conversationManager.setConversationListener(
         OnConversationListener(
           onConversationChanged: (List<ConversationInfo> list) {
-            _mergeConversations(list);
+            debugPrint('[ChatService] Conversations changed: ${list.length}');
+            _mergeOpenImConversations(list);
           },
           onNewConversation: (List<ConversationInfo> list) {
-            _mergeConversations(list);
+            debugPrint('[ChatService] New conversations: ${list.length}');
+            _mergeOpenImConversations(list);
           },
-          onSyncServerStart: (bool? reinstalled) {
-            debugPrint('[ChatService] OpenIM sync started');
-          },
-          onSyncServerFinish: (bool? reinstalled) {
-            debugPrint('[ChatService] OpenIM sync finished');
+          onSyncServerStart: (_) =>
+              debugPrint('[ChatService] OpenIM sync started'),
+          onSyncServerFinish: (_) {
+            debugPrint('[ChatService] OpenIM sync finished — refreshing');
             fetchConversations();
           },
-          onSyncServerFailed: (bool? reinstalled) {
-            debugPrint('[ChatService] OpenIM sync failed');
-          },
-          onTotalUnreadMessageCountChanged: (int count) {
-            debugPrint('[ChatService] Unread count: $count');
-          },
+          onSyncServerFailed: (_) =>
+              debugPrint('[ChatService] OpenIM sync failed'),
+          onTotalUnreadMessageCountChanged: (int count) =>
+              debugPrint('[ChatService] Total unread: $count'),
         ),
       );
 
       _isConnected = true;
       _initialized = true;
       _connectionController.add(true);
-      debugPrint('[ChatService] Connected via OpenIM');
+      debugPrint('[ChatService] Connected (OpenIM SDK)');
 
+      // ── 3. Load conversations from OpenIM's local SQLite immediately ──────
       await fetchConversations();
     } catch (e) {
       debugPrint('[ChatService] connect() error: $e');
-      _errorController.add("Connection failed: $e");
+      _errorController.add('Connection failed: $e');
       _connectionController.add(false);
     }
   }
 
-
-  // ══════════════════════════════════════════════════════════════════════════
+  // ===========================================================================
   //  SEND TEXT MESSAGE
-  // ══════════════════════════════════════════════════════════════════════════
-
+  //  OpenIM persists to local SQLite and syncs to server automatically.
+  // ===========================================================================
   Future<void> sendMessage(ChatMessage message) async {
-    if (!_isConnected) throw Exception("ChatService not connected");
+    if (!_isConnected) throw Exception('ChatService not connected');
 
     try {
+      // createTextMessage builds an OpenIM Message object
       final openImMsg = await OpenIM.iMManager.messageManager
           .createTextMessage(text: message.content);
 
+      // sendMessage delivers via WebSocket and persists to local SQLite
       await OpenIM.iMManager.messageManager.sendMessage(
         message: openImMsg,
         userID: message.receiverId,
@@ -168,45 +183,41 @@ class ChatService {
         ),
       );
 
-      _updateConversationCache(message);
-      _messageController.add(message);
+      // Build a local ChatMessage from the sent OpenIM message for optimistic UI
+      final sent = ChatMessage(
+        id: openImMsg.clientMsgID ??
+            DateTime.now().millisecondsSinceEpoch.toString(),
+        conversationId: message.conversationId,
+        senderId: _currentUserId ?? '',
+        receiverId: message.receiverId,
+        content: message.content,
+        timestamp: DateTime.now(),
+        status: MessageStatus.sent,
+      );
+
+      _cacheMessage(sent);
+      _messageController.add(sent);
     } catch (e) {
       debugPrint('[ChatService] sendMessage error: $e');
-      _errorController.add("Failed to send message: $e");
+      _errorController.add('Failed to send: $e');
       rethrow;
     }
   }
 
-
-  // ══════════════════════════════════════════════════════════════════════════
-  //  SEND VOICE NOTE  ← NEW
-  //
-  //  Flow (mirrors WhatsApp voice notes):
-  //    1. UI records audio via flutter_sound → gets a local file path + duration
-  //    2. UI calls ChatService.sendVoiceMessage(receiverID, filePath, duration)
-  //    3. OpenIM creates a sound message from the file path
-  //    4. OpenIM uploads the file to its server and sends the message
-  //    5. Receiver's onRecvNewMessage fires; _openImMessageToChatMessage()
-  //       reads soundElem and returns a ChatMessage with attachmentType='voice'
-  //
-  //  Parameters:
-  //    receiverID      — OpenIM userID of the other person
-  //    filePath        — absolute path from flutter_sound (e.g. .aac file)
-  //    durationSeconds — length of the recording in whole seconds
-  //    senderName      — shown in the offline push notification
-  // ══════════════════════════════════════════════════════════════════════════
-
+  // ===========================================================================
+  //  SEND VOICE NOTE
+  //  OpenIM uploads the file to its CDN, persists metadata to local SQLite,
+  //  and delivers via WebSocket.
+  // ===========================================================================
   Future<void> sendVoiceMessage({
     required String receiverID,
     required String filePath,
     required int durationSeconds,
     String senderName = 'New voice message',
   }) async {
-    if (!_isConnected) throw Exception("ChatService not connected");
+    if (!_isConnected) throw Exception('ChatService not connected');
 
     try {
-      // createSoundMessageFromFullPath uploads the file to the OpenIM file
-      // server and returns a Message object with soundElem populated.
       final openImMsg = await OpenIM.iMManager.messageManager
           .createSoundMessageFromFullPath(
             soundPath: filePath,
@@ -223,15 +234,14 @@ class ChatService {
         ),
       );
 
-      // Build our local ChatMessage so the sender sees it in the list
-      // immediately (optimistic update), same pattern as sendMessage().
-      final localMsg = ChatMessage(
+      final convId = _deriveConvId(_currentUserId ?? '', receiverID);
+      final local = ChatMessage(
         id: openImMsg.clientMsgID ??
             DateTime.now().millisecondsSinceEpoch.toString(),
-        conversationId: _deriveConvId(_currentUserId ?? '', receiverID),
+        conversationId: convId,
         senderId: _currentUserId ?? '',
         receiverId: receiverID,
-        content: '🎤 Voice message',        // fallback text for conversation preview
+        content: '🎤 Voice message',
         timestamp: DateTime.now(),
         status: MessageStatus.sent,
         attachmentUrl: openImMsg.soundElem?.sourceUrl,
@@ -239,32 +249,35 @@ class ChatService {
         voiceDuration: durationSeconds,
       );
 
-      _updateConversationCache(localMsg);
-      _messageController.add(localMsg);
-
+      _cacheMessage(local);
+      _messageController.add(local);
       debugPrint('[ChatService] Voice note sent (${durationSeconds}s)');
     } catch (e) {
       debugPrint('[ChatService] sendVoiceMessage error: $e');
-      _errorController.add("Failed to send voice message: $e");
+      _errorController.add('Failed to send voice message: $e');
       rethrow;
     }
   }
 
-
-  // ══════════════════════════════════════════════════════════════════════════
+  // ===========================================================================
   //  FETCH MESSAGE HISTORY
   //
-  //  SDK 3.8.3: method is getAdvancedHistoryMessageList
-  //  Returns AdvancedMessage whose .messageList is List<Message>?
-  //  Takes conversationID (not userID)
-  // ══════════════════════════════════════════════════════════════════════════
-
+  //  Reads from OpenIM's local SQLite cache first (fast, offline-capable).
+  //  OpenIM automatically syncs missing messages from server in background.
+  //
+  //  Parameters:
+  //    conversationID — OpenIM conversation ID (not our derived one)
+  //    startMsg       — last known message for pagination (null = load latest)
+  //    count          — number of messages to load per page
+  // ===========================================================================
   Future<List<ChatMessage>> fetchMessageHistory({
     required String conversationID,
     Message? startMsg,
-    int count = 20,
+    int count = 40,
   }) async {
     try {
+      // getAdvancedHistoryMessageList reads from OpenIM's local SQLite.
+      // No network call unless messages are missing from cache.
       final AdvancedMessage result = await OpenIM
           .iMManager.messageManager
           .getAdvancedHistoryMessageList(
@@ -273,77 +286,102 @@ class ChatService {
             count: count,
           );
 
-      final List<ChatMessage> chatMessages = [];
+      final List<ChatMessage> messages = [];
       for (final msg in result.messageList ?? <Message>[]) {
-        final chatMsg = _openImMessageToChatMessage(msg);
+        final chatMsg = _toChat(msg);
         if (chatMsg != null) {
-          chatMessages.add(chatMsg);
-          _updateConversationCache(chatMsg);
+          messages.add(chatMsg);
+          _cacheMessage(chatMsg);
         }
       }
 
-      debugPrint('[ChatService] Fetched ${chatMessages.length} messages');
-      return chatMessages;
+      debugPrint(
+          '[ChatService] fetchMessageHistory: ${messages.length} messages '
+          'for conv $conversationID');
+      return messages;
     } catch (e) {
       debugPrint('[ChatService] fetchMessageHistory error: $e');
       return [];
     }
   }
 
-  // Legacy alias so existing callers don't break
-  Future<void> fetchMessages() async => fetchConversations();
-
-
-  // ══════════════════════════════════════════════════════════════════════════
-  //  FETCH CONVERSATION LIST
-  // ══════════════════════════════════════════════════════════════════════════
-
-  Future<void> fetchConversations({int offset = 0, int count = 50}) async {
+  // ===========================================================================
+  //  FETCH CONVERSATIONS
+  //
+  //  Reads from OpenIM's local SQLite (getConversationListSplit).
+  //  This is the same table OpenIM syncs server-side conversations into.
+  //  Result is instant on subsequent calls — no network needed.
+  // ===========================================================================
+  Future<void> fetchConversations({int offset = 0, int count = 100}) async {
     try {
       final List<ConversationInfo> convs = await OpenIM
           .iMManager.conversationManager
           .getConversationListSplit(offset: offset, count: count);
 
-      _mergeConversations(convs);
+      debugPrint('[ChatService] Loaded ${convs.length} conversations from '
+          'OpenIM local cache');
+      _mergeOpenImConversations(convs);
     } catch (e) {
       debugPrint('[ChatService] fetchConversations error: $e');
     }
   }
 
-
-  // ══════════════════════════════════════════════════════════════════════════
-  //  GET CACHED CONVERSATION MESSAGES
-  // ══════════════════════════════════════════════════════════════════════════
-
-  List<ChatMessage> getConversationMessages(String conversationId) {
-    final messages = List<ChatMessage>.from(
-        _messagesCache[conversationId] ?? []);
-    messages.sort((a, b) => a.timestamp.compareTo(b.timestamp));
-    return messages;
-  }
-
-
-  // ══════════════════════════════════════════════════════════════════════════
+  // ===========================================================================
   //  MARK AS READ
-  // ══════════════════════════════════════════════════════════════════════════
-
+  //  Tells OpenIM to mark all messages in the conversation as read.
+  //  OpenIM updates its local SQLite and syncs the read receipt to server.
+  // ===========================================================================
   Future<void> markConversationAsRead(String conversationId) async {
     try {
       await OpenIM.iMManager.conversationManager
           .markConversationMessageAsRead(conversationID: conversationId);
+
+      // Update our in-memory cache too
+      if (_conversationsMap.containsKey(conversationId)) {
+        _conversationsMap[conversationId] =
+            _conversationsMap[conversationId]!.copyWith(unreadCount: 0);
+        _emitConversations();
+      }
     } catch (e) {
       debugPrint('[ChatService] markConversationAsRead error: $e');
     }
   }
 
+  // ===========================================================================
+  //  GET CACHED MESSAGES (synchronous)
+  //  Returns the in-memory copy — use after fetchMessageHistory() has been called.
+  // ===========================================================================
+  List<ChatMessage> getConversationMessages(String conversationId) {
+    final msgs = List<ChatMessage>.from(_messagesCache[conversationId] ?? []);
+    msgs.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+    return msgs;
+  }
 
-  // ══════════════════════════════════════════════════════════════════════════
-  //  DISCONNECT / DISPOSE
-  // ══════════════════════════════════════════════════════════════════════════
+  // ===========================================================================
+  //  GET OPENIM CONVERSATION ID
+  //
+  //  OpenIM uses its own conversationID format (e.g. "si_uid1_uid2_0").
+  //  Use this to get the real OpenIM conversationID before calling
+  //  fetchMessageHistory().
+  // ===========================================================================
+  Future<String?> getOpenImConversationId(String otherUserId) async {
+    try {
+      final info = await OpenIM.iMManager.conversationManager
+          .getOneConversation(
+            sourceID: otherUserId,
+            sessionType: ConversationType.single,
+          );
+      return info.conversationID;
+    } catch (e) {
+      debugPrint('[ChatService] getOpenImConversationId error: $e');
+      return null;
+    }
+  }
 
-  Future<void> disconnect() async => _handleDisconnect();
-
-  void _handleDisconnect() {
+  // ===========================================================================
+  //  DISCONNECT
+  // ===========================================================================
+  Future<void> disconnect() async {
     if (!_isConnected) return;
     _isConnected = false;
     _initialized = false;
@@ -359,123 +397,124 @@ class ChatService {
     _conversationsController.close();
   }
 
-
-  // ══════════════════════════════════════════════════════════════════════════
+  // ===========================================================================
   //  PRIVATE HELPERS
-  // ══════════════════════════════════════════════════════════════════════════
+  // ===========================================================================
 
-  // ── Convert an OpenIM Message → our ChatMessage ───────────────────────────
-  //
-  // Handles both text messages (contentType == 101) and
-  // voice/sound messages  (contentType == 103).
-  //
-  // OpenIM content type constants (verified from SDK source):
-  //   101 → text
-  //   103 → sound / voice note
-  //   102 → picture
-  //   104 → video
-  // ─────────────────────────────────────────────────────────────────────────
-  ChatMessage? _openImMessageToChatMessage(Message msg) {
-    final senderId = msg.sendID ?? '';
+  // ── Convert OpenIM Message → ChatMessage ────────────────────────────────────
+  // FIX: msg.conversationID does not exist on the OpenIM Message type.
+  // Always derive the conversation ID from sendID + recvID instead.
+  ChatMessage? _toChat(Message msg) {
+    final senderId   = msg.sendID ?? '';
     final receiverId = msg.recvID ?? '';
-    final msgId = msg.clientMsgID ?? msg.serverMsgID ?? '';
+    final msgId      = msg.clientMsgID ?? msg.serverMsgID ?? '';
 
     if (senderId.isEmpty || msgId.isEmpty) return null;
 
+    // Derive a stable conversationID from the two participant IDs.
+    // (msg.conversationID is not a field on the OpenIM Message type.)
     final convId = _deriveConvId(senderId, receiverId);
 
     final timestamp = msg.sendTime != null
         ? DateTime.fromMillisecondsSinceEpoch(msg.sendTime!)
         : DateTime.now();
 
-    // ── Voice note (soundElem) ─────────────────────────────────────────────
-    // OpenIM contentType 103 = sound message
+    // Voice note (contentType 103)
     if (msg.contentType == 103 && msg.soundElem != null) {
       return ChatMessage(
         id: msgId,
         conversationId: convId,
         senderId: senderId,
         receiverId: receiverId,
-        content: '🎤 Voice message',          // preview text
+        content: '🎤 Voice message',
         timestamp: timestamp,
-        status: _mapMsgStatus(msg.status),
-        attachmentUrl: msg.soundElem!.sourceUrl,   // CDN URL after upload
+        status: _mapStatus(msg.status),
+        attachmentUrl: msg.soundElem!.sourceUrl,
         attachmentType: 'voice',
-        voiceDuration: msg.soundElem!.duration,    // seconds
+        voiceDuration: msg.soundElem!.duration,
       );
     }
 
-    // ── Plain text message (textElem) ──────────────────────────────────────
-    final content = msg.textElem?.content ?? '';
+    // Text message (contentType 101)
     return ChatMessage(
       id: msgId,
       conversationId: convId,
       senderId: senderId,
       receiverId: receiverId,
-      content: content,
+      content: msg.textElem?.content ?? '',
       timestamp: timestamp,
-      status: _mapMsgStatus(msg.status),
+      status: _mapStatus(msg.status),
     );
   }
 
-  // Stable sorted conversationId — matches select_contact_screen.dart
-  String _deriveConvId(String id1, String id2) {
-    final ids = [id1, id2]..sort();
-    return '${ids[0]}-${ids[1]}';
+  // ── Convert OpenIM ConversationInfo → ChatConversation ──────────────────────
+  // FIX: conv.latestMsg is typed as Message? (not String?) in the SDK.
+  // Access it as a typed object via .textElem?.content and .contentType.
+  ChatConversation _toConversation(ConversationInfo conv) {
+    final convId  = conv.conversationID ?? '';
+    final otherId = conv.userID ?? '';
+
+    final lastTime = conv.latestMsgSendTime != null
+        ? DateTime.fromMillisecondsSinceEpoch(conv.latestMsgSendTime!)
+        : DateTime.now();
+
+    String lastMsgContent = conv.showName ?? '';
+    try {
+      final latestMsg = conv.latestMsg;
+      if (latestMsg != null) {
+        if (latestMsg.contentType == 103) {
+          // Voice note
+          lastMsgContent = '🎤 Voice message';
+        } else {
+          // Text or any other type — prefer textElem content, fall back to showName
+          final text = latestMsg.textElem?.content;
+          if (text != null && text.isNotEmpty) {
+            lastMsgContent = text;
+          }
+        }
+      }
+    } catch (_) {}
+
+    return ChatConversation(
+      id: convId,
+      participants: [_currentUserId ?? '', otherId],
+      otherUserId: otherId,
+      lastMessage: lastMsgContent,
+      lastMessageSenderId: '',
+      lastMessageTime: lastTime,
+      unreadCount: conv.unreadCount ?? 0,
+      otherUserName: conv.showName,
+      otherUserAvatar: conv.faceURL,
+    );
   }
 
-  MessageStatus _mapMsgStatus(int? status) {
-    switch (status) {
-      case 1:  return MessageStatus.sending;
-      case 2:  return MessageStatus.sent;
-      case 3:  return MessageStatus.failed;
-      default: return MessageStatus.sent;
-    }
-  }
-
-  void _mergeConversations(List<ConversationInfo> openImConvs) {
-    for (final conv in openImConvs) {
-      final convId  = conv.conversationID ?? '';
-      final otherId = conv.userID ?? '';
+  void _mergeOpenImConversations(List<ConversationInfo> convs) {
+    for (final conv in convs) {
+      final convId = conv.conversationID ?? '';
       if (convId.isEmpty) continue;
 
-      final lastTime = conv.latestMsgSendTime != null
-          ? DateTime.fromMillisecondsSinceEpoch(conv.latestMsgSendTime!)
-          : DateTime.now();
-
-      final lastMsg = ChatMessage(
-        id: '${convId}_last',
-        conversationId: convId,
-        senderId: otherId,
-        receiverId: _currentUserId ?? '',
-        content: conv.showName ?? '',
-        timestamp: lastTime,
-        status: MessageStatus.sent,
-      );
-
-      if (_conversationsMap.containsKey(convId)) {
-        _conversationsMap[convId] = _conversationsMap[convId]!
-            .updateWithMessage(lastMsg, _currentUserId ?? '');
-      } else {
-        _conversationsMap[convId] =
-            ChatConversation.fromMessage(lastMsg, _currentUserId ?? '');
-      }
+      final chatConv = _toConversation(conv);
+      _conversationsMap[convId] = chatConv;
     }
     _emitConversations();
   }
 
-  void _updateConversationCache(ChatMessage message) {
-    final convId        = message.conversationId;
-    final currentUserId = _currentUserId ?? '';
+  void _cacheMessage(ChatMessage message) {
+    final convId = message.conversationId;
 
+    // Update conversation preview
     if (_conversationsMap.containsKey(convId)) {
       _conversationsMap[convId] =
-          _conversationsMap[convId]!.updateWithMessage(message, currentUserId);
+          _conversationsMap[convId]!.updateWithMessage(
+            message,
+            _currentUserId ?? '',
+          );
     } else {
       _conversationsMap[convId] =
-          ChatConversation.fromMessage(message, currentUserId);
+          ChatConversation.fromMessage(message, _currentUserId ?? '');
     }
 
+    // Store in message cache (dedup by id)
     _messagesCache.putIfAbsent(convId, () => []);
     if (!_messagesCache[convId]!.any((m) => m.id == message.id)) {
       _messagesCache[convId]!.add(message);
@@ -488,5 +527,21 @@ class ChatService {
     final sorted = _conversationsMap.values.toList()
       ..sort((a, b) => b.lastMessageTime.compareTo(a.lastMessageTime));
     _conversationsController.add(sorted);
+  }
+
+  // Stable sorted conversationID derived from two participant IDs.
+  // Used as a fallback since OpenIM Message objects don't carry conversationID.
+  String _deriveConvId(String id1, String id2) {
+    final ids = [id1, id2]..sort();
+    return '${ids[0]}-${ids[1]}';
+  }
+
+  MessageStatus _mapStatus(int? status) {
+    switch (status) {
+      case 1:  return MessageStatus.sending;
+      case 2:  return MessageStatus.sent;
+      case 3:  return MessageStatus.failed;
+      default: return MessageStatus.sent;
+    }
   }
 }

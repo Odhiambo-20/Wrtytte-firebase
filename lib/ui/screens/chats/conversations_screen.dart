@@ -1,22 +1,38 @@
 import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
+
 import 'package:wrytte/models/chat_models/chat_conversation.dart';
 import 'package:wrytte/services/auth/auth_service.dart';
-import 'package:wrytte/services/chat/chat_local_db.dart';
-import 'package:wrytte/services/chat/firebase_chat_service.dart';
+import 'package:wrytte/services/chat/chat_service.dart';
+import 'package:wrytte/services/contacts/contact_service.dart';
 import 'package:wrytte/ui/screens/chats/chat_screen.dart';
+import 'package:wrytte/ui/screens/chats/widgets/conversation_tile.dart';
 import 'package:wrytte/ui/screens/chats/widgets/mini_chat_window.dart';
 import 'package:wrytte/ui/screens/chats/widgets/top_bar.dart';
-import 'package:wrytte/ui/screens/chats/widgets/conversation_tile.dart';
 import 'package:wrytte/ui/screens/firebase_new_chat_screen.dart';
 import 'widgets/search_bar.dart' as local_widgets;
 import 'widgets/tab_bar_section.dart';
-import 'package:wrytte/services/contacts/contact_service.dart';
+
+// =============================================================================
+//  ConversationsScreen
+//
+//  Reads conversation list from OpenIM SDK's local SQLite cache via ChatService.
+//  No Firebase reads for conversations — only for user display names/avatars
+//  (enrichment step, runs once per unknown user).
+//
+//  Data flow:
+//    1. ChatService.connect() → OpenIM SDK loads conversations from its SQLite
+//    2. _conversationsStream emits the list → UI updates instantly
+//    3. Enrichment: unknown display names are resolved from Firestore /users
+//       and stored in memory for the session.
+//    4. OpenIM real-time listener keeps the list live via ChatService.
+// =============================================================================
 
 const double _kSearchBarHeight = 60.0;
-const double _kTabBarHeight = 56.0;
+const double _kTabBarHeight    = 56.0;
 
 class ConversationsScreen extends StatefulWidget {
   final Function(int)? onUnreadCountUpdated;
@@ -33,343 +49,208 @@ class ConversationsScreen extends StatefulWidget {
 }
 
 class _ConversationsScreenState extends State<ConversationsScreen> {
-  bool _isSyncing = false;
-
-  final FirebaseChatService _firebaseChat = FirebaseChatService();
-  final ChatLocalDb _localDb = ChatLocalDb.instance;
+  final ChatService _chat = ChatService();
 
   List<ChatConversation> _conversations = [];
 
-  bool _isSelectionMode = false;
+  String _currentUserId = '';
+  bool   _isSelectionMode = false;
   final Set<String> _selectedIds = {};
 
-  String _currentUserId = '';
-  StreamSubscription<List<ChatConversation>>? _conversationsSub;
+  StreamSubscription<List<ChatConversation>>? _convSub;
   StreamSubscription<List<ConnectivityResult>>? _connectivitySub;
 
-  final ScrollController _scrollController = ScrollController();
+  final ScrollController _scrollCtrl   = ScrollController();
   double _searchBarProgress = 0.0;
 
-  // ── Strips lone surrogates (invalid UTF-16) that crash the text renderer ──
-  String _sanitize(String s) {
-    return String.fromCharCodes(
-      s.runes.where((r) => r <= 0xD7FF || r >= 0xE000),
-    );
-  }
+  // Display name/avatar cache resolved from Firestore (session-only)
+  final Map<String, String>  _nameCache   = {};
+  final Map<String, String?> _avatarCache = {};
+
+  // ===========================================================================
+  //  LIFECYCLE
+  // ===========================================================================
 
   @override
   void initState() {
     super.initState();
-    _scrollController.addListener(_onScroll);
-    Future.microtask(() => _initialize());
+    _scrollCtrl.addListener(_onScroll);
+    Future.microtask(_initialize);
+  }
+
+  @override
+  void dispose() {
+    _convSub?.cancel();
+    _connectivitySub?.cancel();
+    _scrollCtrl.removeListener(_onScroll);
+    _scrollCtrl.dispose();
+    super.dispose();
   }
 
   void _onScroll() {
-    final offset = _scrollController.offset;
-    final progress = (offset / _kSearchBarHeight).clamp(0.0, 1.0);
+    final progress =
+        (_scrollCtrl.offset / _kSearchBarHeight).clamp(0.0, 1.0);
     if ((progress - _searchBarProgress).abs() > 0.005) {
       setState(() => _searchBarProgress = progress);
     }
   }
 
+  // ===========================================================================
+  //  INITIALIZE
+  // ===========================================================================
+
   Future<void> _initialize() async {
-    _currentUserId = await AuthService.instance.getCurrentUserId() ?? '';
+    _currentUserId = widget.currentUserId.isNotEmpty
+        ? widget.currentUserId
+        : await AuthService.instance.getCurrentUserId() ?? '';
 
     if (_currentUserId.isEmpty) return;
 
-    // Load cached conversations immediately so UI shows something
-    final cached = (await _localDb.loadConversations()).map((c) => c.copyWith(
-      otherUserName: c.otherUserName != null ? _sanitize(c.otherUserName!) : null,
-      otherUserAvatar: c.otherUserAvatar,
-    )).toList();
-    if (mounted && cached.isNotEmpty) {
-      setState(() => _conversations = cached);
-      _notifyUnread(cached);
-    }
-
-    // Pre-warm contact cache so FirebaseNewChatScreen opens instantly
+    // Pre-warm contact cache for FirebaseNewChatScreen
     ContactService.preloadContacts(_currentUserId, ContactService());
 
-    // Listen for connectivity changes and retry enrichment when back online
-    _connectivitySub = Connectivity().onConnectivityChanged.listen((results) {
-      final hasConnection = results.any((r) => r != ConnectivityResult.none);
-      if (hasConnection) {
-        _retryEnrichmentIfNeeded();
-      }
-    });
+    // Connect ChatService (idempotent — safe to call multiple times)
+    await _chat.connect();
 
-    try {
-      await _firebaseChat.connect(userId: _currentUserId);
-
-      // Single subscription — merge incoming with existing, never replace
-      _conversationsSub =
-          _firebaseChat.conversationsStream.listen((incoming){
-        //final enriched = await _enrichWithUserInfo(incoming);
-        final enriched = incoming;
-
-        if (!mounted) return;
-
-        setState(() {
-          // Build a map of the freshly enriched conversations
-          final freshById = {for (final c in enriched) c.id: c};
-
-          // Update existing conversations with fresh data, preserving names
-          final updated = _conversations.map((existing) {
-            final fresh = freshById[existing.id];
-            if (fresh == null) return existing;
-            return fresh.copyWith(
-              otherUserName: fresh.otherUserName ?? existing.otherUserName,
-              otherUserAvatar:
-                  fresh.otherUserAvatar ?? existing.otherUserAvatar,
-            );
-          }).toList();
-
-          // Add brand-new conversations not yet in the list
-          final existingIds = _conversations.map((c) => c.id).toSet();
-          final newOnes =
-              enriched.where((c) => !existingIds.contains(c.id)).toList();
-
-          _conversations = [...updated, ...newOnes];
-          _isSyncing = false;
-        });
-
-        _notifyUnread(_conversations);
-        await _localDb.saveConversations(_conversations);
+    // Subscribe to the OpenIM conversation stream from ChatService
+    _convSub = _chat.conversationsStream.listen((incoming) async {
+      // Enrich any conversations that are missing display names
+      final enriched = await _enrichNames(incoming);
+      if (!mounted) return;
+      setState(() {
+        _conversations = enriched;
       });
-    } catch (e) {
-      debugPrint('ConversationsScreen Firebase error: $e');
-      if (mounted) setState(() => _isSyncing = false);
-    }
-  }
-
-  /// Retry enrichment for conversations that still have no name.
-  /// Called automatically when connectivity is restored.
-  Future<void> _retryEnrichmentIfNeeded() async {
-    final needsEnrichment =
-        _conversations.where((c) => c.otherUserName == null).toList();
-    if (needsEnrichment.isEmpty) return;
-
-    debugPrint('[ENRICH] Retrying for ${needsEnrichment.length} conversations');
-    final enriched = await _enrichWithUserInfo(_conversations);
-    if (!mounted) return;
-
-    setState(() {
-      _conversations = enriched;
+      _notifyUnread(_conversations);
     });
-    await _localDb.saveConversations(_conversations);
+
+    // Retry name enrichment when connectivity is restored
+    _connectivitySub = Connectivity().onConnectivityChanged.listen((results) {
+      final hasNet = results.any((r) => r != ConnectivityResult.none);
+      if (hasNet) _retryEnrichment();
+    });
   }
 
-  Future<List<ChatConversation>> _enrichWithUserInfo(
-    List<ChatConversation> conversations,
+  // ===========================================================================
+  //  ENRICHMENT
+  //  Resolves display names from Firestore /users for conversations where
+  //  OpenIM only has a userID (no nickname set yet).
+  //  Results are cached in _nameCache so Firestore is only hit once per user.
+  // ===========================================================================
+
+  Future<List<ChatConversation>> _enrichNames(
+    List<ChatConversation> convs,
   ) async {
-    final unknownIds = conversations
-        .where((c) => c.otherUserId.isNotEmpty && c.otherUserName == null)
+    // IDs we haven't resolved yet
+    final unknownIds = convs
+        .where((c) =>
+            c.otherUserId.isNotEmpty &&
+            c.otherUserName == null &&
+            !_nameCache.containsKey(c.otherUserId))
         .map((c) => c.otherUserId)
         .toSet()
         .toList();
 
-    debugPrint('[ENRICH] unknownIds: $unknownIds');
+    if (unknownIds.isEmpty) {
+      // Apply cached names to any convs still missing them
+      return _applyCache(convs);
+    }
 
-    if (unknownIds.isEmpty) return conversations;
+    const chunk = 10;
+    for (int i = 0; i < unknownIds.length; i += chunk) {
+      final slice = unknownIds.sublist(
+          i, (i + chunk).clamp(0, unknownIds.length));
 
-    final nameMap = <String, String>{};
-    final avatarMap = <String, String?>{};
-
-    const chunkSize = 10; // whereIn limit for field queries is 10
-
-    // ── Step 1: doc ID lookup (phone-digit UIDs) ──────────────────────────
-    for (int i = 0; i < unknownIds.length; i += chunkSize) {
-      final chunk =
-          unknownIds.sublist(i, (i + chunkSize).clamp(0, unknownIds.length));
       try {
+        // Doc-ID lookup (phone-digit UIDs used by OpenIM)
         final snap = await FirebaseFirestore.instance
             .collection('users')
-            .where(FieldPath.documentId, whereIn: chunk)
+            .where(FieldPath.documentId, whereIn: slice)
             .get();
 
-        debugPrint(
-            '[ENRICH] /users doc-id query returned ${snap.docs.length} docs for chunk: $chunk');
-
         for (final doc in snap.docs) {
-          final data = doc.data();
-          final name = _resolveDisplayName(data);
+          final data   = doc.data();
+          final name   = _resolveName(data);
           final avatar = data['profileImage']?.toString() ??
-              data['photoUrl']?.toString() ??
-              data['avatarUrl']?.toString();
-
-          nameMap[doc.id] = name;
-          avatarMap[doc.id] = (avatar?.isNotEmpty == true) ? avatar : null;
-
-          final matchingConvs =
-              conversations.where((c) => c.otherUserId == doc.id).toList();
-          if (matchingConvs.isNotEmpty) {
-            await _localDb.updateConversationUserInfo(
-              conversationId: matchingConvs.first.id,
-              name: name,
-              avatar: avatarMap[doc.id],
-            );
-          }
+              data['photoUrl']?.toString();
+          _nameCache[doc.id]   = name;
+          _avatarCache[doc.id] = avatar?.isNotEmpty == true ? avatar : null;
         }
       } catch (e) {
-        debugPrint('[ENRICH] ERROR in doc-id lookup: $e');
+        debugPrint('[ConversationsScreen] enrichment error: $e');
       }
     }
 
-    // ── Step 2: field lookup for Firebase Auth UIDs ───────────────────────
-    final stillMissingAfterStep1 =
-        unknownIds.where((id) => !nameMap.containsKey(id)).toList();
+    return _applyCache(convs);
+  }
 
-    for (int i = 0; i < stillMissingAfterStep1.length; i += chunkSize) {
-      final chunk = stillMissingAfterStep1.sublist(
-          i, (i + chunkSize).clamp(0, stillMissingAfterStep1.length));
-      try {
-        final snap = await FirebaseFirestore.instance
-            .collection('users')
-            .where('uid', whereIn: chunk)
-            .get();
-
-        debugPrint(
-            '[ENRICH] /users uid-field query returned ${snap.docs.length} docs for chunk: $chunk');
-
-        for (final doc in snap.docs) {
-          final data = doc.data();
-          final lookupId = data['uid']?.toString() ?? '';
-          if (lookupId.isEmpty) continue;
-
-          final name = _resolveDisplayName(data);
-          final avatar = data['profileImage']?.toString() ??
-              data['photoUrl']?.toString() ??
-              data['avatarUrl']?.toString();
-
-          nameMap[lookupId] = name;
-          avatarMap[lookupId] = (avatar?.isNotEmpty == true) ? avatar : null;
-
-          final matchingConvs =
-              conversations.where((c) => c.otherUserId == lookupId).toList();
-          if (matchingConvs.isNotEmpty) {
-            await _localDb.updateConversationUserInfo(
-              conversationId: matchingConvs.first.id,
-              name: name,
-              avatar: avatarMap[lookupId],
-            );
-          }
-        }
-      } catch (e) {
-        debugPrint('[ENRICH] ERROR in uid-field lookup: $e');
-      }
-    }
-
-    // ── Step 3: contacts sub-collection fallback ──────────────────────────
-    final stillMissing =
-        unknownIds.where((id) => !nameMap.containsKey(id)).toList();
-
-    if (stillMissing.isNotEmpty && _currentUserId.isNotEmpty) {
-      for (int i = 0; i < stillMissing.length; i += chunkSize) {
-        final chunk = stillMissing.sublist(
-            i, (i + chunkSize).clamp(0, stillMissing.length));
-        try {
-          final contactSnap = await FirebaseFirestore.instance
-              .collection('users')
-              .doc(_currentUserId)
-              .collection('contacts')
-              .where('wrytteUserId', whereIn: chunk)
-              .get();
-
-          for (final doc in contactSnap.docs) {
-            final data = doc.data();
-            final userId = data['wrytteUserId']?.toString() ?? '';
-            if (userId.isEmpty) continue;
-            final name = _sanitize(data['displayName']?.toString() ?? '');
-            if (name.isEmpty) continue;
-            final avatar = data['avatarUrl']?.toString();
-
-            nameMap[userId] = name;
-            avatarMap[userId] = (avatar?.isNotEmpty == true) ? avatar : null;
-
-            final matchingConvs =
-                conversations.where((c) => c.otherUserId == userId).toList();
-            if (matchingConvs.isNotEmpty) {
-              await _localDb.updateConversationUserInfo(
-                conversationId: matchingConvs.first.id,
-                name: name,
-                avatar: avatarMap[userId],
-              );
-            }
-          }
-        } catch (e) {
-          debugPrint('[ENRICH] ERROR in contacts lookup: $e');
-        }
-      }
-    }
-
-    return conversations.map((c) {
-      if (nameMap.containsKey(c.otherUserId)) {
+  List<ChatConversation> _applyCache(List<ChatConversation> convs) {
+    return convs.map((c) {
+      if (_nameCache.containsKey(c.otherUserId)) {
         return c.copyWith(
-          otherUserName: nameMap[c.otherUserId],
-          otherUserAvatar: avatarMap[c.otherUserId],
+          otherUserName:   _nameCache[c.otherUserId],
+          otherUserAvatar: _avatarCache[c.otherUserId],
         );
       }
       return c;
     }).toList();
   }
 
-  String _resolveDisplayName(Map<String, dynamic> data) {
-    bool looksLikePhone(String v) {
+  String _resolveName(Map<String, dynamic> data) {
+    bool isPhone(String v) {
       final s = v.replaceAll(RegExp(r'[\s\-()]'), '');
       return s.startsWith('+') || RegExp(r'^\d{7,}$').hasMatch(s);
     }
 
-    // 1. Prefer a real name (not phone-shaped) — sanitize before returning
     final name = data['name']?.toString() ?? '';
-    if (name.isNotEmpty && !looksLikePhone(name)) return _sanitize(name);
+    if (name.isNotEmpty && !isPhone(name)) return name;
 
     final username = data['username']?.toString() ?? '';
-    if (username.isNotEmpty && !looksLikePhone(username)) {
-      return _sanitize(username);
-    }
+    if (username.isNotEmpty && !isPhone(username)) return username;
 
-    // 2. Fall back to phone (phone digits are always safe UTF-16)
     final phone = data['phone']?.toString() ?? '';
     if (phone.isNotEmpty) return phone;
 
-    // 3. Last resort: truncated UID
-    final uid = data['uid']?.toString() ?? '';
-    return uid.isNotEmpty ? uid : 'Unknown';
+    return data['uid']?.toString() ?? 'Unknown';
   }
 
-  void _notifyUnread(List<ChatConversation> conversations) {
-    final total = conversations.fold(0, (sum, c) => sum + c.unreadCount);
+  Future<void> _retryEnrichment() async {
+    final needsEnrich =
+        _conversations.where((c) => c.otherUserName == null).toList();
+    if (needsEnrich.isEmpty) return;
+
+    final enriched = await _enrichNames(_conversations);
+    if (mounted) setState(() => _conversations = enriched);
+  }
+
+  // ===========================================================================
+  //  HELPERS
+  // ===========================================================================
+
+  void _notifyUnread(List<ChatConversation> convs) {
+    final total = convs.fold(0, (sum, c) => sum + c.unreadCount);
     widget.onUnreadCountUpdated?.call(total);
   }
 
-  void _enterSelectionMode() => setState(() {
-        _isSelectionMode = true;
-        _selectedIds.clear();
-      });
+  String _sanitize(String s) => String.fromCharCodes(
+      s.runes.where((r) => r <= 0xD7FF || r >= 0xE000));
 
-  void _exitSelectionMode() => setState(() {
-        _isSelectionMode = false;
-        _selectedIds.clear();
-      });
+  void _enterSelection() =>
+      setState(() { _isSelectionMode = true; _selectedIds.clear(); });
+  void _exitSelection() =>
+      setState(() { _isSelectionMode = false; _selectedIds.clear(); });
+  void _toggleSelection(String id) => setState(() {
+    if (_selectedIds.contains(id)) _selectedIds.remove(id);
+    else _selectedIds.add(id);
+  });
 
-  void _toggleSelection(String id) {
-    setState(() {
-      if (_selectedIds.contains(id)) {
-        _selectedIds.remove(id);
-      } else {
-        _selectedIds.add(id);
-      }
-    });
-  }
-
-  void _onPin() => debugPrint('Pin: ${_selectedIds.toList()}');
+  void _onPin()        => debugPrint('Pin: ${_selectedIds.toList()}');
   void _onMarkAsRead() => debugPrint('MarkAsRead: ${_selectedIds.toList()}');
-  void _onMute() => debugPrint('Mute: ${_selectedIds.toList()}');
-  void _onArchive() => debugPrint('Archive: ${_selectedIds.toList()}');
-  void _onDelete() => debugPrint('Delete: ${_selectedIds.toList()}');
+  void _onMute()       => debugPrint('Mute: ${_selectedIds.toList()}');
+  void _onArchive()    => debugPrint('Archive: ${_selectedIds.toList()}');
+  void _onDelete()     => debugPrint('Delete: ${_selectedIds.toList()}');
 
   String _formatTime(DateTime dt) {
-    final now = DateTime.now();
+    final now  = DateTime.now();
     final local = dt.toLocal();
     final isToday = local.year == now.year &&
         local.month == now.month &&
@@ -390,54 +271,56 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
     return '${local.day}/${local.month}/${local.year}';
   }
 
-  Widget _buildConversationItem(ChatConversation conversation) {
-    final otherId = conversation.otherUserId;
-    // Sanitize name before passing to any text widget
-    final name = _sanitize(conversation.otherUserName ?? conversation.otherUserId);
-    final avatar = conversation.otherUserAvatar;
-    final selected = _selectedIds.contains(conversation.id);
+  // ===========================================================================
+  //  CONVERSATION TILE
+  // ===========================================================================
+
+  Widget _buildTile(ChatConversation conv) {
+    final name     = _sanitize(conv.otherUserName ?? conv.otherUserId);
+    final avatar   = conv.otherUserAvatar;
+    final selected = _selectedIds.contains(conv.id);
 
     return ConversationTile(
       name: name,
-      lastMessage: conversation.lastMessage.isEmpty
+      lastMessage: conv.lastMessage.isEmpty
           ? 'Say hello! 👋'
-          : _sanitize(conversation.lastMessage),
-      time: _formatTime(conversation.lastMessageTime),
+          : _sanitize(conv.lastMessage),
+      time: _formatTime(conv.lastMessageTime),
       avatarUrl: avatar,
-      unreadCount: conversation.unreadCount,
+      unreadCount: conv.unreadCount,
       isSelectionMode: _isSelectionMode,
       isSelected: selected,
-      onSelectionToggle: () => _toggleSelection(conversation.id),
+      onSelectionToggle: () => _toggleSelection(conv.id),
       onLongPress: () {
         showGeneralDialog(
           context: context,
           barrierDismissible: true,
           barrierLabel: 'Preview',
           barrierColor: Colors.transparent,
-          pageBuilder: (_, __, ___) {
-            return MiniChatPreview(
-              conversationId: conversation.id,
-              name: name,
-              avatarUrl: avatar,
-              currentUserId: _currentUserId,
-              receiverId: otherId,
-            );
-          },
+          pageBuilder: (_, __, ___) => MiniChatPreview(
+            conversationId: conv.id,
+            name: name,
+            avatarUrl: avatar,
+            currentUserId: _currentUserId,
+            receiverId: conv.otherUserId,
+          ),
         );
       },
       onTap: () async {
         if (_isSelectionMode) {
-          _toggleSelection(conversation.id);
+          _toggleSelection(conv.id);
           return;
         }
 
-        await _localDb.markConversationRead(conversation.id);
+        // Mark as read via OpenIM (updates local SQLite + server)
+        await _chat.markConversationAsRead(conv.id);
 
         if (mounted) {
           setState(() {
             _conversations = _conversations
-                .map((c) =>
-                    c.id == conversation.id ? c.copyWith(unreadCount: 0) : c)
+                .map((c) => c.id == conv.id
+                    ? c.copyWith(unreadCount: 0)
+                    : c)
                 .toList();
           });
           _notifyUnread(_conversations);
@@ -449,11 +332,11 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
           context,
           MaterialPageRoute(
             builder: (_) => ChatScreen(
-              conversationId: conversation.id,
-              receiverId: otherId,
-              currentUserId: _currentUserId,
-              title: name,
-              avatarUrl: avatar,
+              conversationId: conv.id,
+              receiverId:     conv.otherUserId,
+              currentUserId:  _currentUserId,
+              title:          name,
+              avatarUrl:      avatar,
             ),
           ),
         );
@@ -461,10 +344,14 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
     );
   }
 
+  // ===========================================================================
+  //  BUILD
+  // ===========================================================================
+
   Widget _buildChatsTab(double topPadding) {
     if (_conversations.isEmpty) {
       return ListView(
-        controller: _scrollController,
+        controller: _scrollCtrl,
         padding: EdgeInsets.only(top: topPadding, bottom: 120),
         physics: const BouncingScrollPhysics(),
         children: [
@@ -472,28 +359,18 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
           Center(
             child: Column(
               children: [
-                Icon(
-                  Icons.chat_bubble_outline_rounded,
-                  size: 64,
-                  color: Colors.white.withOpacity(0.12),
-                ),
+                Icon(Icons.chat_bubble_outline_rounded,
+                    size: 64, color: Colors.white.withOpacity(0.12)),
                 const SizedBox(height: 16),
-                Text(
-                  'No conversations yet',
-                  style: TextStyle(
-                    color: Colors.white.withOpacity(0.35),
-                    fontSize: 16,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
+                Text('No conversations yet',
+                    style: TextStyle(
+                        color: Colors.white.withOpacity(0.35),
+                        fontSize: 16,
+                        fontWeight: FontWeight.w500)),
                 const SizedBox(height: 8),
-                Text(
-                  'Tap the pencil icon to start a new chat',
-                  style: TextStyle(
-                    color: Colors.white.withOpacity(0.2),
-                    fontSize: 13,
-                  ),
-                ),
+                Text('Tap the pencil icon to start a new chat',
+                    style: TextStyle(
+                        color: Colors.white.withOpacity(0.2), fontSize: 13)),
               ],
             ),
           ),
@@ -505,43 +382,32 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
       color: const Color(0xFF4DA3FF),
       backgroundColor: Colors.transparent,
       onRefresh: () async {
-        final fresh = (await _localDb.loadConversations()).map((c) => c.copyWith(
-        otherUserName: c.otherUserName != null ? _sanitize(c.otherUserName!) : null,
-        otherUserAvatar: c.otherUserAvatar,
-      )).toList();
-      if (mounted) setState(() => _conversations = fresh);
-        await _retryEnrichmentIfNeeded();
+        // Re-fetch from OpenIM local SQLite + server sync
+        await _chat.fetchConversations();
+        await _retryEnrichment();
       },
       child: ListView.builder(
-        controller: _scrollController,
+        controller: _scrollCtrl,
         physics: const BouncingScrollPhysics(),
         padding: EdgeInsets.only(top: topPadding, bottom: 120),
         itemCount: _conversations.length,
-        itemBuilder: (_, i) => _buildConversationItem(_conversations[i]),
+        itemBuilder: (_, i) => _buildTile(_conversations[i]),
       ),
     );
   }
 
   @override
-  void dispose() {
-    _conversationsSub?.cancel();
-    _connectivitySub?.cancel();
-    _scrollController.removeListener(_onScroll);
-    _scrollController.dispose();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
-    final double statusBarHeight = MediaQuery.of(context).padding.top;
+    final double statusBarH  = MediaQuery.of(context).padding.top;
     final double bottomInset = MediaQuery.of(context).padding.bottom;
-    final double headerHeight = statusBarHeight +
+    final double headerH = statusBarH +
         kToolbarHeight +
         _kSearchBarHeight +
         _kTabBarHeight +
         8.0;
+
     final double searchBarOffset = _kSearchBarHeight * _searchBarProgress;
-    final double gradientHeight = headerHeight - searchBarOffset;
+    final double gradientH = headerH - searchBarOffset;
 
     return Scaffold(
       backgroundColor: Colors.transparent,
@@ -552,14 +418,11 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
           : Padding(
               padding: EdgeInsets.only(bottom: bottomInset + 80.0),
               child: FloatingActionButton(
-                onPressed: () {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (_) => const FirebaseNewChatScreen(),
-                    ),
-                  );
-                },
+                onPressed: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                      builder: (_) => const FirebaseNewChatScreen()),
+                ),
                 backgroundColor: const Color(0xFF4DA3FF),
                 child: const Icon(Icons.edit_square, color: Colors.black),
               ),
@@ -569,39 +432,33 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
         length: 3,
         child: Stack(
           children: [
-            // ── Layer 1: tab content ────────────────────────────────────
+            // ── Tab content ──────────────────────────────────────────────
             Positioned.fill(
               child: TabBarView(
                 children: [
-                  _buildChatsTab(headerHeight),
+                  _buildChatsTab(headerH),
                   Center(
                     child: Padding(
-                      padding: EdgeInsets.only(top: headerHeight),
-                      child: const Text(
-                        'Channels coming soon',
-                        style: TextStyle(color: Colors.grey),
-                      ),
+                      padding: EdgeInsets.only(top: headerH),
+                      child: const Text('Channels coming soon',
+                          style: TextStyle(color: Colors.grey)),
                     ),
                   ),
                   Center(
                     child: Padding(
-                      padding: EdgeInsets.only(top: headerHeight),
-                      child: const Text(
-                        'Groups coming soon',
-                        style: TextStyle(color: Colors.grey),
-                      ),
+                      padding: EdgeInsets.only(top: headerH),
+                      child: const Text('Groups coming soon',
+                          style: TextStyle(color: Colors.grey)),
                     ),
                   ),
                 ],
               ),
             ),
 
-            // ── Layer 2: gradient ───────────────────────────────────────
+            // ── Gradient ─────────────────────────────────────────────────
             Positioned(
-              top: 0,
-              left: 0,
-              right: 0,
-              height: gradientHeight,
+              top: 0, left: 0, right: 0,
+              height: gradientH,
               child: IgnorePointer(
                 child: Container(
                   decoration: BoxDecoration(
@@ -620,19 +477,17 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
               ),
             ),
 
-            // ── Layer 3: sticky header ──────────────────────────────────
+            // ── Sticky header ─────────────────────────────────────────────
             Positioned(
-              top: 0,
-              left: 0,
-              right: 0,
+              top: 0, left: 0, right: 0,
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   TopBar(
                     isSelectionMode: _isSelectionMode,
                     selectedCount: _selectedIds.length,
-                    onEditPressed: _enterSelectionMode,
-                    onSelectionClose: _exitSelectionMode,
+                    onEditPressed: _enterSelection,
+                    onSelectionClose: _exitSelection,
                     onMarkAsRead: _onMarkAsRead,
                     onPin: _onPin,
                     onMute: _onMute,
