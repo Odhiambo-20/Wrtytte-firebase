@@ -61,7 +61,7 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
   void initState() {
     super.initState();
     _scrollController.addListener(_onScroll);
-    _initialize();
+    Future.microtask(() => _initialize());
   }
 
   void _onScroll() {
@@ -103,8 +103,9 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
 
       // Single subscription — merge incoming with existing, never replace
       _conversationsSub =
-          _firebaseChat.conversationsStream.listen((incoming) async {
-        final enriched = await _enrichWithUserInfo(incoming);
+          _firebaseChat.conversationsStream.listen((incoming){
+        //final enriched = await _enrichWithUserInfo(incoming);
+        final enriched = incoming;
 
         if (!mounted) return;
 

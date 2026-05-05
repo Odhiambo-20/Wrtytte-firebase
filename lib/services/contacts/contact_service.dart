@@ -1,5 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:wrytte/services/contacts/contact_local_db.dart';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -311,6 +312,7 @@ class ContactService {
         ownerUserId: selfUserId,
         contact: contact,
       );
+      await ContactLocalDb.addContact(contact);
       // ✅ Invalidate cache so next lookup picks up the new contact
       invalidateCache();
     }
