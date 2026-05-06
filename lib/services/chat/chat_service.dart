@@ -171,7 +171,9 @@ class ChatService {
       _cacheMessage(sent);
       _messageController.add(sent);
     } catch (e) {
-      debugPrint('[ChatService] sendMessage error: $e');
+      //debugPrint('[ChatService] sendMessage error: $e');
+      debugPrint('[ChatService] sendMessage error FULL:');
+      debugPrint(e.toString());
       _errorController.add('Failed to send: $e');
       rethrow;
     }
@@ -480,8 +482,14 @@ class ChatService {
 
   // Strips non-numeric characters from a phone-number-based userID so it
   // is accepted by the OpenIM server, which rejects '+' and other symbols.
+  /*
   String _toOpenImUserId(String id) {
     return id.replaceAll(RegExp(r'[^\d]'), '');
+  }
+  */
+
+  String _toOpenImUserId(String id) {
+  return id.trim();
   }
 
   MessageStatus _mapStatus(int? status) {

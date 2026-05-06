@@ -55,6 +55,7 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _hasMoreOlder = true;
 
   bool _isSending = false;
+  String? _sendError;
 
   UserProfile? _receiverProfile;
 
@@ -261,6 +262,7 @@ class _ChatScreenState extends State<ChatScreen> {
           if (idx != -1) {
             _messages[idx] = optimistic.copyWith(status: MessageStatus.failed);
           }
+          _sendError = e.toString(); 
         });
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -395,6 +397,18 @@ class _ChatScreenState extends State<ChatScreen> {
             children: [
               SizedBox(height: appBarH),
               Expanded(child: _buildMessageList()),
+              Container(
+              color: Colors.red.withOpacity(0.8),
+              padding: const EdgeInsets.all(6),
+              child: Text(
+              'receiver: ${widget.receiverId}\n'
+              'currentUser: ${widget.currentUserId}\n'
+              'convId: $_resolvedConversationId\n'
+              'error: $_sendError',   // ✅ joined to the string above with \n
+              style: const TextStyle(color: Colors.white, fontSize: 11),
+            ),
+
+             ),
               MessageInputField(
                 controller: _controller,
                 focusNode: _focusNode,

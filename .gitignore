@@ -40,3 +40,5 @@ android/file-system.probe
 
 # Flutter build outputs
 build/
+
+.txt
