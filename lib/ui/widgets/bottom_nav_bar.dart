@@ -29,19 +29,22 @@ class _BottomNavBarState extends State<BottomNavBar> {
   @override
   void initState() {
     super.initState();
-    _loadProfile();
-  }
 
-  Future<void> _loadProfile() async {
-    // Check cache first — avoids a Firestore hit on every nav rebuild
+    // ── Step 1: Show cached profile immediately (zero latency) ──────────
     final cached = UserProfileService.instance.cachedProfile;
     if (cached != null) {
-      if (mounted) setState(() => _profile = cached);
-      return;
+      _profile = cached;
     }
 
-    final profile = await UserProfileService.instance.getCurrentUserProfile();
-    if (mounted) setState(() => _profile = profile);
+    // ── Step 2: Subscribe to real-time stream so any update (name,
+    //           avatar) reflects instantly without a hot-restart ─────────
+    UserProfileService.instance
+        .getCurrentUserProfileStream()
+        .listen((profile) {
+      if (mounted && profile != null) {
+        setState(() => _profile = profile);
+      }
+    });
   }
 
   @override
@@ -119,10 +122,9 @@ class _BottomNavBarState extends State<BottomNavBar> {
                               'assets/svg/coin_icon.png',
                               height: 26,
                               width: 26,
-                              color:
-                                  widget.currentIndex == 0
-                                      ? Colors.white
-                                      : const Color(0xFF7A7A7A),
+                              color: widget.currentIndex == 0
+                                  ? Colors.white
+                                  : const Color(0xFF7A7A7A),
                               colorBlendMode: BlendMode.srcIn,
                             ),
                           ),
@@ -142,10 +144,9 @@ class _BottomNavBarState extends State<BottomNavBar> {
                                       : 'assets/svg/chat_icon.svg',
                                   height: 26,
                                   width: 26,
-                                  color:
-                                      widget.currentIndex == 1
-                                          ? Colors.white
-                                          : const Color(0xFF7A7A7A),
+                                  color: widget.currentIndex == 1
+                                      ? Colors.white
+                                      : const Color(0xFF7A7A7A),
                                 ),
                                 if (widget.totalUnreadCount > 0)
                                   Positioned(
@@ -192,10 +193,9 @@ class _BottomNavBarState extends State<BottomNavBar> {
                               'assets/svg/posts_icon.png',
                               height: 26,
                               width: 26,
-                              color:
-                                  widget.currentIndex == 2
-                                      ? Colors.white
-                                      : const Color(0xFF7A7A7A),
+                              color: widget.currentIndex == 2
+                                  ? Colors.white
+                                  : const Color(0xFF7A7A7A),
                               colorBlendMode: BlendMode.srcIn,
                             ),
                           ),
@@ -211,26 +211,24 @@ class _BottomNavBarState extends State<BottomNavBar> {
                                   ? Icons.call
                                   : Icons.call_outlined,
                               size: 26,
-                              color:
-                                  widget.currentIndex == 3
-                                      ? Colors.white
-                                      : const Color(0xFF7A7A7A),
+                              color: widget.currentIndex == 3
+                                  ? Colors.white
+                                  : const Color(0xFF7A7A7A),
                             ),
                           ),
                           label: 'Calls',
                         ),
 
-                        /// Profile — real avatar from Firestore
+                        /// Profile — real avatar from Firestore stream
                         BottomNavigationBarItem(
                           icon: _NavIcon(
                             isActive: widget.currentIndex == 4,
                             isAvatar: true,
                             child: UserAvatar(
                               size: 28,
-                              imageUrl:
-                                  _profile?.hasProfileImage == true
-                                      ? _profile!.profileImage
-                                      : null,
+                              imageUrl: _profile?.hasProfileImage == true
+                                  ? _profile!.profileImage
+                                  : null,
                               name: _profile?.displayName,
                             ),
                           ),

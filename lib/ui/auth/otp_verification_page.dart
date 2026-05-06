@@ -5,15 +5,6 @@ import 'package:wrytte/services/auth/real_number_service.dart';
 import 'package:wrytte/ui/auth/add_profile_page.dart';
 import 'package:wrytte/ui/screens/home_screen.dart';
 
-// UI is 100% identical to the original.
-// The only logic change is in _verifyOtp():
-//   • Calls RealNumberService.registerRealPhone() which now routes through
-//     OpenIMChatService → POST /account/register (port 10008)
-//   • On success for signup flow  → navigates to AddProfilePage
-//   • On success for signin flow  → navigates to HomeScreen
-//   • The "123456" dev shortcut is preserved because RealNumberService
-//     still stores it in memory via OpenIMChatService.sendVerificationCode()
-
 class OtpVerificationPage extends StatefulWidget {
   final String phoneNumber;
   final bool isSignInFlow;
@@ -83,7 +74,6 @@ class _OtpVerificationPageState extends State<OtpVerificationPage>
     });
   }
 
-  // ── ONLY METHOD CHANGED FROM ORIGINAL ─────────────────────────────────────
   Future<void> _verifyOtp() async {
     if (!_isValid || _isLoading) return;
 
@@ -95,11 +85,6 @@ class _OtpVerificationPageState extends State<OtpVerificationPage>
     HapticFeedback.lightImpact();
 
     try {
-      // RealNumberService now routes through OpenIMChatService:
-      //   1. Validates "123456" locally (dev shortcut preserved)
-      //   2. Calls POST /account/register on the chat server (port 10008)
-      //   3. Calls AuthService.persistPhoneSession() to save tokens
-      //   4. Calls AuthService.loginToOpenIM() to connect the SDK
       final result = await _realNumberService.registerRealPhone(
         fullPhone: widget.phoneNumber,
         code: _otpController.text,
@@ -108,8 +93,27 @@ class _OtpVerificationPageState extends State<OtpVerificationPage>
 
       if (!mounted) return;
 
-      if (widget.isSignInFlow) {
-        // Sign-in → go straight to home (same as before)
+      // ── Routing logic ────────────────────────────────────────────────────
+      //
+      // result.isNewUser = true  → first signup  → MUST set profile name
+      // result.isNewUser = false → returning user → go straight to HomeScreen
+      //
+      // NOTE: isSignInFlow is kept for callers that explicitly set it, but
+      // isNewUser from the server is the authoritative source of truth.
+      // A phone that already has an account always skips AddProfilePage,
+      // even if somehow routed through the signup UI.
+
+      if (result.isNewUser) {
+        // First-time signup — user must set their display name.
+        Navigator.pushAndRemoveUntil(
+          context,
+          MaterialPageRoute(
+            builder: (_) => const AddProfilePage(isNewUser: true),
+          ),
+          (_) => false,
+        );
+      } else {
+        // Returning user — profile already exists, go straight to chat.
         Navigator.pushAndRemoveUntil(
           context,
           MaterialPageRoute(
@@ -117,31 +121,23 @@ class _OtpVerificationPageState extends State<OtpVerificationPage>
           ),
           (_) => false,
         );
-      } else {
-        // Sign-up → go to AddProfilePage so user can set their name
-        Navigator.pushAndRemoveUntil(
-          context,
-          MaterialPageRoute(builder: (_) => const AddProfilePage()),
-          (_) => false,
-        );
       }
     } catch (e) {
-  HapticFeedback.heavyImpact();
-  _shakeController.forward(from: 0);
+      HapticFeedback.heavyImpact();
+      _shakeController.forward(from: 0);
 
-  if (!mounted) return;
+      if (!mounted) return;
 
-  setState(() {
-    _errorMessage = e.toString(); // ← Show the REAL error, not hardcoded string
-    _otpController.clear();
-  });
+      setState(() {
+        _errorMessage = e.toString();
+        _otpController.clear();
+      });
 
-  debugPrint('OTP ERROR: $e');
-}finally {
+      debugPrint('OTP ERROR: $e');
+    } finally {
       if (mounted) setState(() => _isLoading = false);
     }
   }
-  // ── END OF CHANGED METHOD ─────────────────────────────────────────────────
 
   Future<void> _resendCode() async {
     if (!_canResend || _isLoading) return;

@@ -1,5 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:wrytte/services/contacts/contact_local_db.dart';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -18,7 +19,7 @@ class ContactService {
   // ── Cache to avoid repeated Firestore lookups ──────────────────────────
   Map<String, String>? _phoneUserMapCache;
   DateTime? _cacheTime;
-  
+
   // ── Static in-memory cache shared across screen opens ──────────────────
   static List<Contact>? _firestoreContactsCache;
   static String? _firestoreContactsCacheOwner;
@@ -102,8 +103,8 @@ class ContactService {
   }
 
   // ──────────────────────────────────────────────────────────────────────
-  // Save contact to TOP-LEVEL users collection
-  // Stays inside Wrytte — never written to device phonebook
+  // Save contact to PRIVATE subcollection under the owner's user document
+  // users/{ownerUserId}/contacts/{phoneDigits}
   // ──────────────────────────────────────────────────────────────────────
   Future<void> saveContactToFirestore({
     required String ownerUserId,
@@ -120,43 +121,50 @@ class ContactService {
       }
 
       final docId = phone.replaceAll(RegExp(r'[^\d]'), '');
-      final userRef = _firestore.collection('users').doc(docId);
 
-      await userRef.set({
+      //  FIXED: write to private subcollection under the owner's UID
+      final contactRef = _firestore
+          .collection('users')
+          .doc(ownerUserId)
+          .collection('contacts')
+          .doc(docId);
+
+      await contactRef.set({
         'phone': phone,
         'name': contact.displayName ?? '',
         'username': contact.displayName ?? '',
         'uid': contact.wrytteUserId ?? docId,
         'openImUserId': contact.wrytteUserId ?? '',
         'isOnWrytte': contact.isOnWrytte,
-        'savedBy': ownerUserId,
         'avatarUrl': contact.avatarUrl ?? '',
         'updatedAt': FieldValue.serverTimestamp(),
         'createdAt': FieldValue.serverTimestamp(),
       }, SetOptions(merge: true));
 
-      debugPrint('✅ Contact saved to users/$docId: ${contact.displayName}');
+      debugPrint(' Contact saved to users/$ownerUserId/contacts/$docId: ${contact.displayName}');
     } catch (e, stack) {
-      debugPrint('🔴 Firestore write FAILED: $e');
-      debugPrint('🔴 Stack: $stack');
+      debugPrint(' Firestore write FAILED: $e');
+      debugPrint(' Stack: $stack');
       rethrow;
     }
   }
 
   // ──────────────────────────────────────────────────────────────────────
-  // Fetch contacts saved by this user from Firestore
+  // Fetch contacts saved by this user — from their PRIVATE subcollection
   // ──────────────────────────────────────────────────────────────────────
   Future<List<Contact>> getFirestoreContacts(String ownerUserId) async {
     final currentUid = FirebaseAuth.instance.currentUser?.uid;
     if (currentUid == null) {
-      debugPrint('🔴 Not authenticated');
+      debugPrint(' Not authenticated');
       return [];
     }
 
     try {
+      //  FIXED: read only from this user's private subcollection
       final snapshot = await _firestore
           .collection('users')
-          .where('savedBy', isEqualTo: ownerUserId)
+          .doc(ownerUserId)
+          .collection('contacts')
           .get();
 
       final contacts = snapshot.docs.map((doc) {
@@ -198,7 +206,7 @@ class ContactService {
     final token = await FirebaseAuth.instance.currentUser?.getIdToken();
     if (token == null || token.isEmpty) throw Exception('User not authenticated');
 
-    // ✅ Use cache if less than 5 minutes old
+    //  Use cache if less than 5 minutes old
     final now = DateTime.now();
     final cacheValid = _cacheTime != null &&
         now.difference(_cacheTime!).inMinutes < 5 &&
@@ -207,10 +215,10 @@ class ContactService {
     Map<String, String> phoneUserMap;
 
     if (cacheValid) {
-      debugPrint('✅ Using cached phone lookup');
+      debugPrint(' Using cached phone lookup');
       phoneUserMap = _phoneUserMapCache!;
     } else {
-      // ✅ Run ALL chunks in parallel
+      //  Run ALL chunks in parallel
       const chunkSize = 10;
       final chunks = <List<String>>[];
       for (var i = 0; i < allPhones.length; i += chunkSize) {
@@ -231,7 +239,7 @@ class ContactService {
         phoneUserMap.addAll(result);
       }
 
-      // ✅ Store in cache
+      //  Store in cache
       _phoneUserMapCache = phoneUserMap;
       _cacheTime = now;
     }
@@ -270,14 +278,14 @@ class ContactService {
 
   // ──────────────────────────────────────────────────────────────────────
   // Save a manually-entered contact
-  // ✅ NEVER writes to device phonebook — stays inside Wrytte only
+  //  NEVER writes to device phonebook — stays inside Wrytte only
   // ──────────────────────────────────────────────────────────────────────
   Future<Contact> saveManualContact({
     required String firstName,
     required String lastName,
     required String fullIdentifier,
     required String? wrytteUserId,
-    required bool syncToPhone, // parameter kept for compatibility, ignored
+    required bool syncToPhone,
     required String token,
     required String? selfUserId,
   }) async {
@@ -296,9 +304,6 @@ class ContactService {
       );
     }
 
-    // ✅ syncToPhone is intentionally ignored — contact stays in Wrytte only
-    // Device phonebook is NEVER touched
-
     final contact = Contact(
       displayName: displayName,
       phones: [fullIdentifier],
@@ -306,20 +311,23 @@ class ContactService {
       wrytteUserId: wrytteUserId,
     );
 
-    if (selfUserId != null && selfUserId.isNotEmpty) {
+    if (selfUserId != null && selfUserId.isNotEmpty)
+     {
       await saveContactToFirestore(
         ownerUserId: selfUserId,
         contact: contact,
       );
-      // ✅ Invalidate cache so next lookup picks up the new contact
+      await ContactLocalDb.addContact(contact);
+
       invalidateCache();
+      invalidateFirestoreCache();
     }
 
     return contact;
   }
 
   // ──────────────────────────────────────────────────────────────────────
-  // OpenIM REST — addFriend (unchanged)
+  // OpenIM REST — addFriend
   // ──────────────────────────────────────────────────────────────────────
   Future<void> _openImAddFriend({
     required String selfUserId,
@@ -337,7 +345,6 @@ class ContactService {
         'operationID': DateTime.now().millisecondsSinceEpoch.toString(),
       },
       body: jsonEncode({
-        'fromUserID': selfUserId,
         'toUserID': friendUserId,
         'reqMsg': 'Hello! I would like to add you on Wrytte.',
         'ex': '',

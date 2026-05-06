@@ -196,6 +196,7 @@ class AuthWrapper extends StatefulWidget {
 class _AuthWrapperState extends State<AuthWrapper> {
   bool _checking = true;   // true while reading secure storage
   bool _isLoggedIn = false;
+  bool _needsProfile = false; 
   String? _currentUserId;
 
   final CallListenerService _callListener = CallListenerService();
@@ -212,39 +213,61 @@ class _AuthWrapperState extends State<AuthWrapper> {
   //  Takes ~50ms on device. Shows a plain black screen while waiting,
   //  which is indistinguishable from the native splash.
   // ---------------------------------------------------------------------------
+
   Future<void> _checkSession() async {
     try {
       final user = await AuthService.instance.getCurrentUser();
-
       final loggedIn = user != null && user.isAuthenticated && !user.isExpired;
-      final userId   = user?.userId;
-
-      if (mounted) {
-        setState(() {
-          _isLoggedIn    = loggedIn;
-          _currentUserId = userId;
-          _checking      = false;
-        });
-      }
-
-      FlutterNativeSplash.remove();
+      final userId = user?.userId;
 
       if (loggedIn && userId != null && userId.isNotEmpty) {
         _initServicesInBackground(
-          userId:   userId,
+          userId: userId,
           nickname: user?.username ?? userId,
         );
+
+        // ✅ Check if user has set a real name
+        final doc = await FirebaseFirestore.instance
+            .collection('users')
+            .doc(userId)
+            .get()
+            .timeout(const Duration(seconds: 6));
+
+        final name = doc.data()?['name'] as String? ?? '';
+        final needsProfile = name.isEmpty ||
+            name.trim().length < 2 ||
+            _looksLikePhone(name.trim());
+
+        if (mounted) {
+          setState(() {
+            _isLoggedIn = loggedIn;
+            _currentUserId = userId;
+            _needsProfile = needsProfile; // ← new field
+            _checking = false;
+          });
+        }
+      } else {
+        if (mounted) {
+          setState(() {
+            _isLoggedIn = false;
+            _checking = false;
+          });
+        }
       }
+
+      FlutterNativeSplash.remove();
     } catch (e) {
       debugPrint('[AuthWrapper] Session check error: $e');
       if (mounted) {
-        setState(() {
-          _isLoggedIn = false;
-          _checking   = false;
-        });
+        setState(() { _isLoggedIn = false; _checking = false; });
       }
       FlutterNativeSplash.remove();
     }
+  }
+
+  bool _looksLikePhone(String value) {
+    final s = value.replaceAll(RegExp(r'[\s\-()]'), '');
+    return s.startsWith('+') || RegExp(r'^\d{6,}$').hasMatch(s);
   }
 
   @override
@@ -286,16 +309,22 @@ class _AuthWrapperState extends State<AuthWrapper> {
   }
 
   @override
-  Widget build(BuildContext context) {
-    // Brief loading state while secure storage is read (~50ms)
-    if (_checking) {
-      return const Scaffold(
-        backgroundColor: Color(0xFF08090B),
-        body: SizedBox.shrink(), // plain black — matches splash
-      );
-    }
+    Widget build(BuildContext context) {
+      if (_checking) {
+        return const Scaffold(
+          backgroundColor: Color(0xFF08090B),
+          body: SizedBox.shrink(),
+        );
+      }
 
-    if (!_isLoggedIn) return const AuthEntryScreen();
+      if (!_isLoggedIn) return const AuthEntryScreen();
+
+      // ✅ Send to profile page if name is missing or is a phone number
+      if (_needsProfile) {
+        return const AddProfilePage(isNewUser: false);
+      }
+
     return HomeScreen(currentUserId: _currentUserId!);
-  }
+ }
 }
+

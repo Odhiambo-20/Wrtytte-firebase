@@ -3,7 +3,6 @@ import 'package:wrytte/components/contact_components/firebase_new_chat_item.dart
 import 'package:wrytte/models/contact_model.dart';
 import 'package:wrytte/models/user_models/user_profile_service.dart';
 import 'package:wrytte/services/auth/auth_service.dart';
-import 'package:wrytte/services/chat/firebase_chat_service.dart';
 import 'package:wrytte/services/contacts/contact_service.dart';
 import 'package:wrytte/ui/screens/chats/chat_screen.dart';
 import 'package:wrytte/ui/screens/new_contact_screen.dart';
@@ -56,13 +55,14 @@ class _FirebaseNewChatScreenState extends State<FirebaseNewChatScreen> {
   void _onSearchChanged() {
     final query = _searchController.text.toLowerCase();
     setState(() {
-       _filteredContacts = _allContacts
+      _filteredContacts = _allContacts
           .where((c) =>
               _sanitize(c.formattedName).toLowerCase().contains(query) ||
               c.primaryPhone.contains(query))
           .toList();
     });
   }
+
   String _sanitize(String s) {
     return String.fromCharCodes(
       s.runes.where((r) => r <= 0xD7FF || r >= 0xE000),
@@ -73,11 +73,9 @@ class _FirebaseNewChatScreenState extends State<FirebaseNewChatScreen> {
     try {
       final currentUserId = await AuthService.instance.getCurrentUserId() ?? '';
 
-      // ✅ Step 1 — Load Firestore contacts instantly, show them immediately
-      // No loading spinner — contacts appear right away like WhatsApp
       if (currentUserId.isNotEmpty) {
-        
-        final firestoreContacts = await _contactService.getFirestoreContactsCached(currentUserId);
+        final firestoreContacts =
+            await _contactService.getFirestoreContactsCached(currentUserId);
 
         firestoreContacts.sort((a, b) => a.formattedName
             .toLowerCase()
@@ -87,20 +85,17 @@ class _FirebaseNewChatScreenState extends State<FirebaseNewChatScreen> {
           setState(() {
             _allContacts = firestoreContacts;
             _filteredContacts = firestoreContacts;
-            _isLoading = false; // ✅ Show immediately, no spinner
+            _isLoading = false;
           });
         }
       } else {
         if (mounted) setState(() => _isLoading = false);
       }
 
-      // ✅ Step 2 — Match device contacts against Wrytte in background
-      // This updates the list silently without any loading effect
       final wrytteContacts = await _contactService.getWrytteContactsOptimized();
 
       if (!mounted) return;
 
-      // Merge — deduplicate by phone number
       final currentUserId2 =
           await AuthService.instance.getCurrentUserId() ?? '';
       final firestoreContacts =
@@ -142,22 +137,23 @@ class _FirebaseNewChatScreenState extends State<FirebaseNewChatScreen> {
     }
   }
 
-
   Future<void> _navigateToChat(Contact contact) async {
     final currentUserId = await AuthService.instance.getCurrentUserId() ?? '';
     if (currentUserId.isEmpty) return;
 
-    // ✅ Use wrytteUserId if available, otherwise use phone number as the ID
-    final receiverId = (contact.wrytteUserId != null && contact.wrytteUserId!.isNotEmpty)
-        ? contact.wrytteUserId!
-        : contact.primaryPhone.replaceAll(RegExp(r'[^\d]'), '');
+    // The OpenIM userID is the phone number with the + prefix preserved.
+    // wrytteUserId already stores it in this format when the contact was saved.
+    // Fall back to primaryPhone as-is (which should include the + from E.164).
+    final receiverId =
+        (contact.wrytteUserId != null && contact.wrytteUserId!.isNotEmpty)
+            ? contact.wrytteUserId!
+            : contact.primaryPhone;
 
     if (receiverId.isEmpty) return;
 
-    final conversationId = FirebaseChatService.buildConversationId(
-      currentUserId,
-      receiverId,
-    );
+    // Derive the OpenIM conversationID: si_{smaller}_{larger} (sorted)
+    final ids = [currentUserId, receiverId]..sort();
+    final conversationId = 'si_${ids[0]}_${ids[1]}';
 
     if (!mounted) return;
     Navigator.pop(context);
@@ -180,7 +176,6 @@ class _FirebaseNewChatScreenState extends State<FirebaseNewChatScreen> {
     for (final contact in contacts) {
       final sanitized = _sanitize(contact.formattedName);
       final letter = sanitized.isNotEmpty ? sanitized[0].toUpperCase() : '#';
-
       grouped.putIfAbsent(letter, () => []).add(contact);
     }
     final keys = grouped.keys.toList()..sort();

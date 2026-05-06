@@ -1,4 +1,6 @@
+import 'dart:convert';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wrytte/models/user_models/user_profile_service.dart';
 import 'package:wrytte/services/auth/auth_service.dart';
 
@@ -9,28 +11,80 @@ class UserProfileService {
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
 
   static const _collection = 'users';
+  static const _prefKey = 'cached_user_profile'; // ← SharedPreferences key
 
-  // In-memory cache so screens don't re-fetch on every rebuild
   UserProfile? _cachedProfile;
+  String? _cachedUid;
+
+  // ─────────────────────────────────────────────────────────────
+  // PERSIST / LOAD  (survives app restarts)
+  // ─────────────────────────────────────────────────────────────
+
+  Future<void> _persistProfile(UserProfile profile) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_prefKey, jsonEncode(profile.toMap()..['uid'] = profile.uid));
+    } catch (_) {}
+  }
+
+  Future<UserProfile?> _loadPersistedProfile() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_prefKey);
+      if (raw == null) return null;
+      final map = jsonDecode(raw) as Map<String, dynamic>;
+      final uid = map['uid'] as String? ?? '';
+      if (uid.isEmpty) return null;
+      return UserProfile.fromMap(uid, map);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _clearPersistedProfile() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(_prefKey);
+    } catch (_) {}
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // WARM UP
+  // ─────────────────────────────────────────────────────────────
+
+  Future<void> warmUp() async {
+    // ① Load persisted profile instantly — zero network latency
+    if (_cachedProfile == null) {
+      final persisted = await _loadPersistedProfile();
+      if (persisted != null) {
+        _cachedProfile = persisted;
+        _cachedUid = persisted.uid;
+      }
+    }
+
+    // ② Then fetch fresh from Firestore in background
+    final uid = await AuthService.instance.getCurrentUserId();
+    if (uid == null || uid.isEmpty) return;
+    _cachedUid = uid;
+    await getProfileByUid(uid);
+  }
 
   // ─────────────────────────────────────────────────────────────
   // FETCH
   // ─────────────────────────────────────────────────────────────
 
-  /// Fetches the current logged-in user's profile from Firestore.
-  /// Returns null if the user is not authenticated or document missing.
   Future<UserProfile?> getCurrentUserProfile({
     bool forceRefresh = false,
   }) async {
     if (_cachedProfile != null && !forceRefresh) return _cachedProfile;
 
-    final uid = await AuthService.instance.getCurrentUserId();
+    final uid = _cachedUid ?? await AuthService.instance.getCurrentUserId();
     if (uid == null || uid.isEmpty) return null;
+    _cachedUid = uid;
 
     return getProfileByUid(uid);
   }
 
-  /// Fetches any user's profile by their Firestore document UID.
   Future<UserProfile?> getProfileByUid(String uid) async {
     try {
       final doc = await _firestore.collection(_collection).doc(uid).get();
@@ -38,10 +92,12 @@ class UserProfileService {
 
       final profile = UserProfile.fromMap(uid, doc.data()!);
 
-      // Cache if it's the current user
-      final currentUid = await AuthService.instance.getCurrentUserId();
+      final currentUid =
+          _cachedUid ?? await AuthService.instance.getCurrentUserId();
       if (currentUid == uid) {
         _cachedProfile = profile;
+        _cachedUid = uid;
+        await _persistProfile(profile); // ← save to disk
       }
 
       return profile;
@@ -50,16 +106,13 @@ class UserProfileService {
     }
   }
 
-  /// Fetches any user's profile by their phone number.
-  /// Useful for chat — look up a contact by phone.
   Future<UserProfile?> getProfileByPhone(String phone) async {
     try {
-      final query =
-          await _firestore
-              .collection(_collection)
-              .where('phone', isEqualTo: phone)
-              .limit(1)
-              .get();
+      final query = await _firestore
+          .collection(_collection)
+          .where('phone', isEqualTo: phone)
+          .limit(1)
+          .get();
 
       if (query.docs.isEmpty) return null;
 
@@ -71,36 +124,50 @@ class UserProfileService {
   }
 
   // ─────────────────────────────────────────────────────────────
-  // STREAM  (real-time updates — useful for profile screen)
+  // STREAM
   // ─────────────────────────────────────────────────────────────
 
-  /// Stream of the current user's profile — auto-updates on changes.
   Stream<UserProfile?> getCurrentUserProfileStream() async* {
-    final uid = await AuthService.instance.getCurrentUserId();
+    // Emit persisted profile instantly if in-memory cache is empty
+    if (_cachedProfile == null) {
+      final persisted = await _loadPersistedProfile();
+      if (persisted != null) {
+        _cachedProfile = persisted;
+        _cachedUid = persisted.uid;
+      }
+    }
+
+    if (_cachedProfile != null) yield _cachedProfile;
+
+    final uid = _cachedUid ?? await AuthService.instance.getCurrentUserId();
     if (uid == null || uid.isEmpty) {
       yield null;
       return;
     }
+    _cachedUid = uid;
 
     yield* _firestore
         .collection(_collection)
         .doc(uid)
         .snapshots()
         .map((doc) {
-          if (!doc.exists || doc.data() == null) return null;
-          final profile = UserProfile.fromMap(doc.id, doc.data()!);
-          _cachedProfile = profile;
-          return profile;
-        });
+      if (!doc.exists || doc.data() == null) return null;
+      final profile = UserProfile.fromMap(doc.id, doc.data()!);
+      _cachedProfile = profile;
+      _persistProfile(profile); // ← keep disk cache fresh
+      return profile;
+    });
   }
 
   // ─────────────────────────────────────────────────────────────
   // CACHE HELPERS
   // ─────────────────────────────────────────────────────────────
 
-  /// Returns the cached profile synchronously — use where async is not ideal.
   UserProfile? get cachedProfile => _cachedProfile;
 
-  /// Call on logout to wipe the in-memory cache.
-  void clearCache() => _cachedProfile = null;
+  void clearCache() {
+    _cachedProfile = null;
+    _cachedUid = null;
+    _clearPersistedProfile(); // ← wipe disk too on logout
+  }
 }

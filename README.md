@@ -436,4 +436,54 @@ curl -s -X POST http://localhost:10008/account/login \
 
 # Stop everything
 docker compose down
+
+
+
+---------------------------------------------------
+
+Where are these chats coming from cause I cleared cache and the firebase but am still seeing them
+
+These chats are coming from your **OpenIM server**, not Firebase.
+
+You have `flutter_openim_sdk` in your `pubspec.yaml` and your own OpenIM server running at:
 ```
+http://34.63.32.143:10008
+```
+
+OpenIM stores chats on **its own server and local SDK cache**, completely separate from Firebase. That's why clearing Firebase didn't remove them.
+
+---
+
+## To Clear Them
+
+**Option 1 — Clear OpenIM local SDK cache** (on device):
+```dart
+OpenIM.iMManager.logout();
+```
+
+**Option 2 — Clear from the server side**, go to your OpenIM docker:
+```bash
+cd ~/Pictures/wrytte/openim-docker-fresh
+docker compose down
+docker volume prune
+docker compose up -d
+```
+⚠️ This deletes **all** messages for all users.
+
+**Option 3 — Uninstall the app** on the device, which wipes the local OpenIM SDK storage.
+
+---
+
+## Summary
+
+| Storage | Cleared by Firebase clear? |
+|---|---|
+| Firebase Firestore | ✅ Yes |
+| OpenIM server | ❌ No |
+| OpenIM local SDK | ❌ No |
+
+
+
+```
+
+

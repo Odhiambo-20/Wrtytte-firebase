@@ -16,23 +16,9 @@ import 'package:wrytte/ui/screens/chats/widgets/message_bubble.dart';
 import 'package:wrytte/ui/screens/chats/widgets/message_input.dart';
 import 'package:wrytte/ui/screens/profile_screen.dart';
 
-// =============================================================================
-//  ChatScreen
-//
-//  All messages are loaded from and written to the OpenIM SDK, which manages
-//  its own SQLite local cache.  No Firebase reads happen here.
-//
-//  Message loading strategy:
-//    1. On open → getAdvancedHistoryMessageList() reads OpenIM's local SQLite
-//       instantly (no network needed).
-//    2. Real-time messages arrive via onRecvNewMessage listener already set up
-//       in ChatService.connect().
-//    3. Scroll to top → load older page (pagination via startMsg).
-// =============================================================================
-
 class ChatScreen extends StatefulWidget {
-  final String conversationId;   // OpenIM conversationID
-  final String receiverId;       // Other user's OpenIM userID
+  final String conversationId;
+  final String receiverId;
   final String currentUserId;
   final String title;
   final String? avatarUrl;
@@ -51,9 +37,9 @@ class ChatScreen extends StatefulWidget {
 }
 
 class _ChatScreenState extends State<ChatScreen> {
-  final TextEditingController _controller    = TextEditingController();
-  final ScrollController      _scrollCtrl    = ScrollController();
-  final FocusNode             _focusNode     = FocusNode();
+  final TextEditingController _controller = TextEditingController();
+  final ScrollController      _scrollCtrl = ScrollController();
+  final FocusNode             _focusNode  = FocusNode();
 
   final ChatService _chat = ChatService();
   final CallService _call = CallService.instance;
@@ -62,10 +48,11 @@ class _ChatScreenState extends State<ChatScreen> {
 
   final List<ChatMessage> _messages = [];
 
-  // Pagination
-  Message? _oldestOpenImMsg; // used as cursor for loading older pages
-  bool _loadingOlder  = false;
-  bool _hasMoreOlder  = true;
+  String? _resolvedConversationId;
+
+  Message? _oldestOpenImMsg;
+  bool _loadingOlder = false;
+  bool _hasMoreOlder = true;
 
   bool _isSending = false;
 
@@ -74,9 +61,9 @@ class _ChatScreenState extends State<ChatScreen> {
   static const double _kHeaderPillH = 48.0;
   static const double _kInputPillH  = 40.0;
 
-  // ===========================================================================
-  //  LIFECYCLE
-  // ===========================================================================
+
+  // LIFECYCLE
+
 
   @override
   void initState() {
@@ -95,20 +82,54 @@ class _ChatScreenState extends State<ChatScreen> {
     super.dispose();
   }
 
-  // ===========================================================================
-  //  INIT
-  // ===========================================================================
+  String _normaliseId(String id) {
+    return id.startsWith('+') ? id.substring(1) : id;
+  }
+
+  String _buildSortedConvId(String normalisedReceiverId) {
+    final ids = [normalisedReceiverId, widget.currentUserId]..sort();
+    return 'si_${ids[0]}_${ids[1]}';
+  }
+
+
+  // RESOLVE CONVERSATION ID
+
+
+  Future<String> _resolveConversationId() async {
+    if (_resolvedConversationId != null) return _resolvedConversationId!;
+
+    final normalisedReceiverId = _normaliseId(widget.receiverId);
+
+    try {
+      final ConversationInfo conv = await OpenIM
+          .iMManager
+          .conversationManager
+          .getOneConversation(
+            sourceID: normalisedReceiverId,
+            sessionType: ConversationType.single,
+          );
+      _resolvedConversationId =
+          conv.conversationID ?? _buildSortedConvId(normalisedReceiverId);
+    } catch (_) {
+      _resolvedConversationId = _buildSortedConvId(normalisedReceiverId);
+    }
+
+    return _resolvedConversationId!;
+  }
+
+
+  // INIT
+
 
   Future<void> _loadInitial() async {
-    // Ensure ChatService is connected (idempotent)
     await _chat.connect();
 
-    // Mark conversation as read via OpenIM (updates local SQLite + server)
-    await _chat.markConversationAsRead(widget.conversationId);
+    final realConvId = await _resolveConversationId();
 
-    // Load latest messages from OpenIM's local SQLite cache
+    await _chat.markConversationAsRead(realConvId);
+
     final msgs = await _chat.fetchMessageHistory(
-      conversationID: widget.conversationId,
+      conversationID: realConvId,
       count: 40,
     );
 
@@ -120,11 +141,10 @@ class _ChatScreenState extends State<ChatScreen> {
     });
     WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
 
-    // Listen for new incoming messages from ChatService
     _msgSub = _chat.messageStream.listen((msg) {
-      if (msg.conversationId != widget.conversationId) return;
+      if (msg.conversationId != realConvId) return;
       if (!mounted) return;
-      if (_messages.any((m) => m.id == msg.id)) return; // dedup
+      if (_messages.any((m) => m.id == msg.id)) return;
 
       setState(() => _messages.add(msg));
       WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
@@ -137,9 +157,9 @@ class _ChatScreenState extends State<ChatScreen> {
     if (mounted) setState(() => _receiverProfile = profile);
   }
 
-  // ===========================================================================
-  //  PAGINATION — load older messages when user scrolls to top
-  // ===========================================================================
+
+  // PAGINATION
+
 
   void _onScroll() {
     if (_scrollCtrl.position.pixels <= 80 &&
@@ -153,37 +173,38 @@ class _ChatScreenState extends State<ChatScreen> {
     if (_loadingOlder || !_hasMoreOlder) return;
     setState(() => _loadingOlder = true);
 
-    // We need the raw OpenIM Message object for the cursor.
-    // Fetch using the oldest message we have as the start point.
+    final realConvId = await _resolveConversationId();
+
     try {
-      // Get the raw OpenIM message for our oldest ChatMessage
       Message? cursor;
       if (_oldestOpenImMsg != null) {
         cursor = _oldestOpenImMsg;
       }
 
       final older = await _chat.fetchMessageHistory(
-        conversationID: widget.conversationId,
+        conversationID: realConvId,
         startMsg: cursor,
         count: 40,
       );
 
       if (older.isEmpty) {
-        setState(() { _hasMoreOlder = false; _loadingOlder = false; });
+        setState(() {
+          _hasMoreOlder = false;
+          _loadingOlder = false;
+        });
         return;
       }
 
       final currentOffset = _scrollCtrl.position.pixels;
 
       setState(() {
-        // Prepend older messages, dedup
         final existingIds = _messages.map((m) => m.id).toSet();
-        final newOnes = older.where((m) => !existingIds.contains(m.id)).toList();
+        final newOnes =
+            older.where((m) => !existingIds.contains(m.id)).toList();
         _messages.insertAll(0, newOnes);
         _loadingOlder = false;
       });
 
-      // Maintain scroll position after prepend
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (_scrollCtrl.hasClients) {
           _scrollCtrl.jumpTo(
@@ -197,9 +218,9 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  // ===========================================================================
-  //  SEND TEXT
-  // ===========================================================================
+
+  // SEND TEXT
+
 
   Future<void> _send() async {
     final text = _controller.text.trim();
@@ -208,12 +229,14 @@ class _ChatScreenState extends State<ChatScreen> {
     _controller.clear();
     setState(() => _isSending = true);
 
-    // Optimistic message shown immediately
+    final realConvId           = await _resolveConversationId();
+    final normalisedReceiverId = _normaliseId(widget.receiverId);
+
     final optimistic = ChatMessage(
       id: 'opt_${DateTime.now().millisecondsSinceEpoch}',
-      conversationId: widget.conversationId,
+      conversationId: realConvId,
       senderId: widget.currentUserId,
-      receiverId: widget.receiverId,
+      receiverId: normalisedReceiverId,
       content: text,
       timestamp: DateTime.now(),
       status: MessageStatus.sending,
@@ -225,9 +248,6 @@ class _ChatScreenState extends State<ChatScreen> {
     try {
       await _chat.sendMessage(optimistic);
 
-      // Replace optimistic with confirmed (ChatService emits the real one)
-      // The messageStream listener will add the real message and dedup will
-      // prevent duplicates since we check by id.
       if (mounted) {
         setState(() {
           _messages.removeWhere((m) => m.id == optimistic.id);
@@ -254,17 +274,20 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  // ===========================================================================
-  //  SEND VOICE NOTE
-  // ===========================================================================
+
+  // SEND VOICE NOTE
+
 
   Future<void> _sendVoiceNote(String filePath, int durationSeconds) async {
+    final realConvId           = await _resolveConversationId();
+    final normalisedReceiverId = _normaliseId(widget.receiverId);
+
     final placeholderId = 'voice_${DateTime.now().millisecondsSinceEpoch}';
     final placeholder = ChatMessage(
       id: placeholderId,
-      conversationId: widget.conversationId,
+      conversationId: realConvId,
       senderId: widget.currentUserId,
-      receiverId: widget.receiverId,
+      receiverId: normalisedReceiverId,
       content: '',
       timestamp: DateTime.now(),
       status: MessageStatus.sending,
@@ -277,7 +300,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
     try {
       await _chat.sendVoiceMessage(
-        receiverID: widget.receiverId,
+        receiverID: normalisedReceiverId,
         filePath: filePath,
         durationSeconds: durationSeconds,
       );
@@ -299,15 +322,18 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  // ===========================================================================
-  //  CALL
-  // ===========================================================================
+
+  // CALL
+
 
   Future<void> _startCall(CallType type) async {
-    final displayName = _receiverProfile?.displayName ?? widget.title;
+    //final displayName          = _receiverProfile?.displayName ?? widget.title;
+    final normalisedReceiverId = _normaliseId(widget.receiverId);
+    final displayName = widget.title;
+
     try {
       await _call.makeCall(
-        receiverId:   widget.receiverId,
+        receiverId:   normalisedReceiverId,
         type:         type,
         callerName:   widget.currentUserId,
         callerAvatar: '',
@@ -315,7 +341,7 @@ class _ChatScreenState extends State<ChatScreen> {
       if (!mounted) return;
       Navigator.of(context).push(MaterialPageRoute(
         builder: (_) => CallScreen(
-          remoteUserId:     widget.receiverId,
+          remoteUserId:     normalisedReceiverId,
           remoteUserName:   displayName,
           remoteUserAvatar: _receiverProfile?.hasProfileImage == true
               ? _receiverProfile!.profileImage
@@ -336,9 +362,9 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  // ===========================================================================
-  //  SCROLL
-  // ===========================================================================
+
+  // SCROLL
+
 
   void _scrollToBottom() {
     if (_scrollCtrl.hasClients) {
@@ -350,9 +376,9 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  // ===========================================================================
-  //  BUILD
-  // ===========================================================================
+
+  // BUILD
+
 
   @override
   Widget build(BuildContext context) {
@@ -365,7 +391,6 @@ class _ChatScreenState extends State<ChatScreen> {
       extendBody: true,
       body: Stack(
         children: [
-          // ── Messages + Input ─────────────────────────────────────────────
           Column(
             children: [
               SizedBox(height: appBarH),
@@ -381,7 +406,6 @@ class _ChatScreenState extends State<ChatScreen> {
             ],
           ),
 
-          // ── Top gradient scrim ────────────────────────────────────────────
           Positioned(
             top: 0, left: 0, right: 0,
             height: appBarH + 20,
@@ -403,7 +427,6 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
           ),
 
-          // ── App bar ───────────────────────────────────────────────────────
           Positioned(
             top: 0, left: 0, right: 0,
             child: _buildAppBar(statusBarH),
@@ -413,14 +436,13 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  // ===========================================================================
-  //  MESSAGE LIST
-  // ===========================================================================
+
+  // MESSAGE LIST
+
 
   Widget _buildMessageList() {
     return Column(
       children: [
-        // Loading indicator for older messages
         if (_loadingOlder)
           const Padding(
             padding: EdgeInsets.all(8),
@@ -437,7 +459,7 @@ class _ChatScreenState extends State<ChatScreen> {
           child: _messages.isEmpty
               ? Center(
                   child: Text(
-                    'No messages yet.\nSay hello! 👋',
+                    'No messages yet.\nSay hello!',
                     textAlign: TextAlign.center,
                     style: TextStyle(
                       color: Colors.white.withOpacity(0.3),
@@ -480,13 +502,12 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  // ===========================================================================
-  //  APP BAR
-  // ===========================================================================
+
+  // APP BAR
+
 
   Widget _buildAppBar(double statusBarH) {
-    final displayName = _receiverProfile?.displayName ?? widget.title;
-
+    final displayName = widget.title;
     return Padding(
       padding: EdgeInsets.only(top: statusBarH),
       child: SizedBox(
@@ -504,7 +525,6 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
               const SizedBox(width: 8),
 
-              // Name + avatar pill
               Expanded(
                 child: GestureDetector(
                   onTap: () => Navigator.push(
@@ -602,9 +622,9 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  // ===========================================================================
-  //  HELPERS
-  // ===========================================================================
+
+  // HELPERS
+
 
   String _formatTime(DateTime dt) {
     final h      = dt.hour % 12 == 0 ? 12 : dt.hour % 12;
@@ -618,10 +638,13 @@ class _ChatScreenState extends State<ChatScreen> {
       padding: const EdgeInsets.symmetric(vertical: 12),
       child: Row(
         children: [
-          Expanded(child: Divider(color: Colors.white.withOpacity(0.08), height: 1)),
+          Expanded(
+              child: Divider(
+                  color: Colors.white.withOpacity(0.08), height: 1)),
           const SizedBox(width: 10),
           Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+            padding:
+                const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
             decoration: BoxDecoration(
               color: const Color(0xFF23262C).withOpacity(0.60),
               borderRadius: BorderRadius.circular(12),
@@ -636,7 +659,9 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
           ),
           const SizedBox(width: 10),
-          Expanded(child: Divider(color: Colors.white.withOpacity(0.08), height: 1)),
+          Expanded(
+              child: Divider(
+                  color: Colors.white.withOpacity(0.08), height: 1)),
         ],
       ),
     );
@@ -660,7 +685,8 @@ class _ChatScreenState extends State<ChatScreen> {
             decoration: BoxDecoration(
               color: const Color(0xFF23262C).withOpacity(0.30),
               borderRadius: BorderRadius.circular(height / 2),
-              border: Border.all(color: const Color(0xFF23262C), width: 1.0),
+              border:
+                  Border.all(color: const Color(0xFF23262C), width: 1.0),
             ),
             child: Center(child: child),
           ),

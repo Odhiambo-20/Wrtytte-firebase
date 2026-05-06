@@ -207,23 +207,24 @@ class _NewContactPageState extends State<NewContactPage> {
   }
 
   Future<void> _lookupUser() async {
+    final freshToken = await AuthService.instance.getOpenImToken() ?? widget.token;
     debugPrint('🔍 _lookupUser called, identifier: $_fullIdentifier');
     final identifier = _fullIdentifier;
     if (identifier.isEmpty) return;
 
     try {
-      debugPrint("🔑 token: ${widget.token.isEmpty ? "EMPTY" : widget.token.substring(0, widget.token.length.clamp(0, 20))}");
+      debugPrint("🔑 token: ${freshToken.isEmpty ? "EMPTY" : freshToken.substring(0, freshToken.length.clamp(0, 20))}");
       final Map<String, String> result;
 
       if (_isWrytteIdMode) {
         result = await _searchService.searchUsersByPhones(
           phoneNumbersC: identifier,
-          token: widget.token,
+          token: freshToken,
         );
       } else {
         result = await _searchService.searchUsersByPhones(
           phoneNumbersA: [identifier],
-          token: widget.token,
+          token: freshToken,
         );
       }
 
@@ -282,23 +283,19 @@ class _NewContactPageState extends State<NewContactPage> {
       final receiverId = saved.wrytteUserId ?? '';
       final conversationId = ([selfId, receiverId]..sort()).join('_');
 
-      if (saved.isOnWrytte && receiverId.isNotEmpty) {
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (_) => ChatScreen(
-              conversationId: conversationId,
-              receiverId: receiverId,
-              currentUserId: selfId,
-              title: saved.formattedName,
-              avatarUrl: saved.avatarUrl,
-            ),
+      // Always navigate to chat — whether on Wrytte or not
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+          builder: (_) => ChatScreen(
+            conversationId: conversationId,
+            receiverId: receiverId.isNotEmpty ? receiverId : _fullIdentifier,
+            currentUserId: selfId,
+            title: saved.formattedName,
+            avatarUrl: saved.avatarUrl,
           ),
-        );
-      } else {
-        // Contact not on Wrytte — just go back
-        Navigator.pop(context, saved);
-      }
+        ),
+      );
     } catch (e) {
       debugPrint('Save contact error: $e');
       if (!mounted) return;

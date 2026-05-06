@@ -7,6 +7,8 @@ import 'package:wrytte/services/contacts/contact_service.dart';
 import 'package:wrytte/ui/screens/chats/chat_screen.dart';
 import 'package:wrytte/ui/screens/new_contact_screen.dart';
 
+import 'package:wrytte/services/contacts/contact_local_db.dart';
+
 class SelectContactScreen extends StatefulWidget {
   const SelectContactScreen({super.key});
 
@@ -73,58 +75,39 @@ class _SelectContactScreenState extends State<SelectContactScreen> {
         _error = '';
       });
 
-      // ── Get current user ID for Firestore lookup ──────────────────────────
-      final currentUserId = await AuthService.instance.getCurrentUserId() ?? '';
+      final currentUserId =
+          await AuthService.instance.getCurrentUserId() ?? '';
 
-      // ── Fetch all three sources in parallel ───────────────────────────────
-      final results = await Future.wait([
-        _contactService.getWrytteContactsOptimized(),
-        _contactService.getNonWrytteContacts(),
-        currentUserId.isNotEmpty
-            ? _contactService.getFirestoreContacts(currentUserId)
-            : Future.value(<Contact>[]),
-      ]);
+      final localContacts = await ContactLocalDb.loadContacts();
 
-      final deviceWrytteContacts = results[0];
-      final deviceNonWrytteContacts = results[1];
-      final firestoreContacts = results[2];
-
-      // ── Merge Firestore contacts, deduplicating by phone number ───────────
-      final seenPhones = <String>{};
-
-      for (final c in deviceWrytteContacts) {
-        seenPhones.addAll(c.phones);
-      }
-      for (final c in deviceNonWrytteContacts) {
-        seenPhones.addAll(c.phones);
+      if (mounted && localContacts.isNotEmpty) {
+        setState(() {
+          _wrytteContacts =
+              localContacts.where((c) => c.isOnWrytte).toList();
+          _nonWrytteContacts =
+              localContacts.where((c) => !c.isOnWrytte).toList();
+          _filteredWrytte = _wrytteContacts;
+          _filteredNonWrytte = _nonWrytteContacts;
+          _isLoading = false;
+        });
       }
 
-      final List<Contact> extraWrytte = [];
-      final List<Contact> extraNonWrytte = [];
+      final firestoreContacts =
+          await _contactService.getFirestoreContacts(currentUserId);
 
-      for (final fc in firestoreContacts) {
-        final alreadySeen = fc.phones.any((p) => seenPhones.contains(p));
-        if (alreadySeen) continue;
+      await ContactLocalDb.saveContacts(firestoreContacts);
 
-        seenPhones.addAll(fc.phones);
-
-        if (fc.isOnWrytte) {
-          extraWrytte.add(fc);
-        } else {
-          extraNonWrytte.add(fc);
-        }
+      if (mounted) {
+        setState(() {
+          _wrytteContacts =
+              firestoreContacts.where((c) => c.isOnWrytte).toList();
+          _nonWrytteContacts =
+              firestoreContacts.where((c) => !c.isOnWrytte).toList();
+          _filteredWrytte = _wrytteContacts;
+          _filteredNonWrytte = _nonWrytteContacts;
+          _isLoading = false;
+        });
       }
-
-      final mergedWrytte = [...deviceWrytteContacts, ...extraWrytte];
-      final mergedNonWrytte = [...deviceNonWrytteContacts, ...extraNonWrytte];
-
-      setState(() {
-        _wrytteContacts = mergedWrytte;
-        _nonWrytteContacts = mergedNonWrytte;
-        _filteredWrytte = mergedWrytte;
-        _filteredNonWrytte = mergedNonWrytte;
-        _isLoading = false;
-      });
     } catch (e) {
       setState(() {
         _error = e.toString();

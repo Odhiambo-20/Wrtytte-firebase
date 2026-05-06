@@ -19,16 +19,14 @@ import 'widgets/tab_bar_section.dart';
 // =============================================================================
 //  ConversationsScreen
 //
-//  Reads conversation list from OpenIM SDK's local SQLite cache via ChatService.
-//  No Firebase reads for conversations — only for user display names/avatars
-//  (enrichment step, runs once per unknown user).
-//
-//  Data flow:
-//    1. ChatService.connect() → OpenIM SDK loads conversations from its SQLite
-//    2. _conversationsStream emits the list → UI updates instantly
-//    3. Enrichment: unknown display names are resolved from Firestore /users
-//       and stored in memory for the session.
-//    4. OpenIM real-time listener keeps the list live via ChatService.
+//  Name resolution priority (highest → lowest):
+//    1. Saved contacts  — Firestore /users where savedBy == currentUserId.
+//       These have the human display names the user typed (e.g. "John Doe").
+//       Applied UNCONDITIONALLY — even when OpenIM already has a showName —
+//       because OpenIM's showName is just the phone number registered at
+//       sign-up, not the local user's contact alias.
+//    2. Firestore /users doc by document ID (phone digits) — session cache.
+//    3. Raw otherUserId — last resort fallback.
 // =============================================================================
 
 const double _kSearchBarHeight = 60.0;
@@ -60,10 +58,16 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
   StreamSubscription<List<ChatConversation>>? _convSub;
   StreamSubscription<List<ConnectivityResult>>? _connectivitySub;
 
-  final ScrollController _scrollCtrl   = ScrollController();
+  final ScrollController _scrollCtrl = ScrollController();
   double _searchBarProgress = 0.0;
 
-  // Display name/avatar cache resolved from Firestore (session-only)
+  // ── Priority 1: saved contact names keyed by phone digits ─────────────────
+  // e.g. "254700239641" → "John Doe"
+  final Map<String, String>  _contactNameCache   = {};
+  final Map<String, String?> _contactAvatarCache = {};
+
+  // ── Priority 2: Firestore /users doc fallback (session-only) ─────────────
+  // Key: phone digits (same format as _contactNameCache)
   final Map<String, String>  _nameCache   = {};
   final Map<String, String?> _avatarCache = {};
 
@@ -106,24 +110,24 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
 
     if (_currentUserId.isEmpty) return;
 
+    // Load saved contacts FIRST so names are ready before conversations render
+    await _loadSavedContacts();
+
     // Pre-warm contact cache for FirebaseNewChatScreen
     ContactService.preloadContacts(_currentUserId, ContactService());
 
-    // Connect ChatService (idempotent — safe to call multiple times)
+    // Connect ChatService (idempotent)
     await _chat.connect();
 
-    // Subscribe to the OpenIM conversation stream from ChatService
+    // Subscribe to OpenIM conversation stream
     _convSub = _chat.conversationsStream.listen((incoming) async {
-      // Enrich any conversations that are missing display names
       final enriched = await _enrichNames(incoming);
       if (!mounted) return;
-      setState(() {
-        _conversations = enriched;
-      });
+      setState(() => _conversations = enriched);
       _notifyUnread(_conversations);
     });
 
-    // Retry name enrichment when connectivity is restored
+    // Retry enrichment when connectivity is restored
     _connectivitySub = Connectivity().onConnectivityChanged.listen((results) {
       final hasNet = results.any((r) => r != ConnectivityResult.none);
       if (hasNet) _retryEnrichment();
@@ -131,81 +135,166 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
   }
 
   // ===========================================================================
+  //  LOAD SAVED CONTACTS
+  //  Reads contacts the user explicitly saved (savedBy == currentUserId).
+  //  Populates _contactNameCache keyed by phone digits for O(1) lookup.
+  // ===========================================================================
+
+  Future<void> _loadSavedContacts() async {
+    try {
+      // Always fetch fresh from Firestore — don't rely on stale static cache
+      final contacts = await ContactService()
+          .getFirestoreContactsCached(_currentUserId);
+
+      // Clear existing cache before reloading so removed/renamed contacts
+      // don't linger
+      _contactNameCache.clear();
+      _contactAvatarCache.clear();
+
+      for (final c in contacts) {
+        final name = c.displayName ?? '';
+        // Only cache real human names — skip if it looks like a phone number
+        if (name.isEmpty || _looksLikePhone(name)) continue;
+
+        for (final phone in c.phones) {
+          // Strip everything except digits so we can match with/without '+'
+          final digits = phone.replaceAll(RegExp(r'[^\d]'), '');
+          if (digits.length >= 7) {
+            _contactNameCache[digits]   = name;
+            _contactAvatarCache[digits] = c.avatarUrl?.isNotEmpty == true
+                ? c.avatarUrl
+                : null;
+          }
+        }
+      }
+
+      debugPrint(
+          '[ConversationsScreen] loaded ${_contactNameCache.length} saved contact names');
+    } catch (e) {
+      debugPrint('[ConversationsScreen] _loadSavedContacts error: $e');
+    }
+  }
+
+  // ===========================================================================
   //  ENRICHMENT
-  //  Resolves display names from Firestore /users for conversations where
-  //  OpenIM only has a userID (no nickname set yet).
-  //  Results are cached in _nameCache so Firestore is only hit once per user.
+  //
+  //  Pass 1 — saved contact names (ALWAYS applied, even over OpenIM showName).
+  //    OpenIM's showName is the phone number used at registration, not the
+  //    local user's chosen contact name.
+  //
+  //  Pass 2 — Firestore /users doc fallback.
+  //    Only runs for conversations where pass 1 found no saved-contact name
+  //    AND the current name is still a phone number or missing entirely.
   // ===========================================================================
 
   Future<List<ChatConversation>> _enrichNames(
     List<ChatConversation> convs,
   ) async {
-    // IDs we haven't resolved yet
-    final unknownIds = convs
-        .where((c) =>
-            c.otherUserId.isNotEmpty &&
-            c.otherUserName == null &&
-            !_nameCache.containsKey(c.otherUserId))
-        .map((c) => c.otherUserId)
+    // ── Pass 1: saved contact names always win ─────────────────────────────
+    final afterSavedContacts = convs.map((c) {
+      final digits = c.otherUserId.replaceAll(RegExp(r'[^\d]'), '');
+      if (_contactNameCache.containsKey(digits)) {
+        return c.copyWith(
+          otherUserName:   _contactNameCache[digits],
+          otherUserAvatar: _contactAvatarCache[digits],
+        );
+      }
+      return c;
+    }).toList();
+
+    // ── Pass 2: Firestore fallback for still-unnamed conversations ─────────
+    final unknownDigits = afterSavedContacts
+        .where((c) => _needsFirestoreLookup(c))
+        .map((c) => c.otherUserId.replaceAll(RegExp(r'[^\d]'), ''))
+        .where((d) => d.isNotEmpty && !_nameCache.containsKey(d))
         .toSet()
         .toList();
 
-    if (unknownIds.isEmpty) {
-      // Apply cached names to any convs still missing them
-      return _applyCache(convs);
-    }
+    if (unknownDigits.isNotEmpty) {
+      const chunk = 10;
+      for (int i = 0; i < unknownDigits.length; i += chunk) {
+        final slice = unknownDigits.sublist(
+            i, (i + chunk).clamp(0, unknownDigits.length));
 
-    const chunk = 10;
-    for (int i = 0; i < unknownIds.length; i += chunk) {
-      final slice = unknownIds.sublist(
-          i, (i + chunk).clamp(0, unknownIds.length));
+        try {
+          final snap = await FirebaseFirestore.instance
+              .collection('users')
+              .where(FieldPath.documentId, whereIn: slice)
+              .get();
 
-      try {
-        // Doc-ID lookup (phone-digit UIDs used by OpenIM)
-        final snap = await FirebaseFirestore.instance
-            .collection('users')
-            .where(FieldPath.documentId, whereIn: slice)
-            .get();
+          for (final doc in snap.docs) {
+            final data   = doc.data();
+            final digits = doc.id;
 
-        for (final doc in snap.docs) {
-          final data   = doc.data();
-          final name   = _resolveName(data);
-          final avatar = data['profileImage']?.toString() ??
-              data['photoUrl']?.toString();
-          _nameCache[doc.id]   = name;
-          _avatarCache[doc.id] = avatar?.isNotEmpty == true ? avatar : null;
+            // Prefer saved-contact name if somehow we have one
+            if (_contactNameCache.containsKey(digits)) {
+              _nameCache[digits]   = _contactNameCache[digits]!;
+              _avatarCache[digits] = _contactAvatarCache[digits];
+            } else {
+              _nameCache[digits]   = _resolveName(data);
+              final avatar = data['profileImage']?.toString() ??
+                  data['photoUrl']?.toString() ??
+                  data['avatarUrl']?.toString();
+              _avatarCache[digits] =
+                  avatar?.isNotEmpty == true ? avatar : null;
+            }
+          }
+        } catch (e) {
+          debugPrint('[ConversationsScreen] enrichment error: $e');
         }
-      } catch (e) {
-        debugPrint('[ConversationsScreen] enrichment error: $e');
       }
     }
 
-    return _applyCache(convs);
+    return _applyFallbackCache(afterSavedContacts);
   }
 
-  List<ChatConversation> _applyCache(List<ChatConversation> convs) {
+  /// Returns true when this conversation still needs a Firestore lookup.
+  bool _needsFirestoreLookup(ChatConversation c) {
+    final digits = c.otherUserId.replaceAll(RegExp(r'[^\d]'), '');
+    if (digits.isEmpty) return false;
+    // Already resolved by saved contacts
+    if (_contactNameCache.containsKey(digits)) return false;
+    // No name at all
+    if (c.otherUserName == null) return true;
+    // Name is a phone number — needs a better name from Firestore
+    return _looksLikePhone(c.otherUserName!);
+  }
+
+  /// Applies the Firestore fallback cache to conversations that:
+  ///   - Were NOT resolved by saved contacts (pass 1)
+  ///   - Have a usable non-phone name in the fallback cache
+  List<ChatConversation> _applyFallbackCache(List<ChatConversation> convs) {
     return convs.map((c) {
-      if (_nameCache.containsKey(c.otherUserId)) {
-        return c.copyWith(
-          otherUserName:   _nameCache[c.otherUserId],
-          otherUserAvatar: _avatarCache[c.otherUserId],
-        );
+      final digits = c.otherUserId.replaceAll(RegExp(r'[^\d]'), '');
+      // Don't overwrite a name that came from saved contacts
+      if (_contactNameCache.containsKey(digits)) return c;
+      // Apply Firestore fallback if we have a real name for this number
+      if (_nameCache.containsKey(digits)) {
+        final cached = _nameCache[digits]!;
+        if (!_looksLikePhone(cached)) {
+          return c.copyWith(
+            otherUserName:   cached,
+            otherUserAvatar: _avatarCache[digits],
+          );
+        }
       }
       return c;
     }).toList();
   }
 
-  String _resolveName(Map<String, dynamic> data) {
-    bool isPhone(String v) {
-      final s = v.replaceAll(RegExp(r'[\s\-()]'), '');
-      return s.startsWith('+') || RegExp(r'^\d{7,}$').hasMatch(s);
-    }
+  /// Returns true when [value] is a raw phone number rather than a
+  /// human display name.
+  bool _looksLikePhone(String value) {
+    final s = value.replaceAll(RegExp(r'[\s\-()]'), '');
+    return s.startsWith('+') || RegExp(r'^\d{7,}$').hasMatch(s);
+  }
 
+  String _resolveName(Map<String, dynamic> data) {
     final name = data['name']?.toString() ?? '';
-    if (name.isNotEmpty && !isPhone(name)) return name;
+    if (name.isNotEmpty && !_looksLikePhone(name)) return name;
 
     final username = data['username']?.toString() ?? '';
-    if (username.isNotEmpty && !isPhone(username)) return username;
+    if (username.isNotEmpty && !_looksLikePhone(username)) return username;
 
     final phone = data['phone']?.toString() ?? '';
     if (phone.isNotEmpty) return phone;
@@ -214,10 +303,7 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
   }
 
   Future<void> _retryEnrichment() async {
-    final needsEnrich =
-        _conversations.where((c) => c.otherUserName == null).toList();
-    if (needsEnrich.isEmpty) return;
-
+    await _loadSavedContacts();
     final enriched = await _enrichNames(_conversations);
     if (mounted) setState(() => _conversations = enriched);
   }
@@ -250,7 +336,7 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
   void _onDelete()     => debugPrint('Delete: ${_selectedIds.toList()}');
 
   String _formatTime(DateTime dt) {
-    final now  = DateTime.now();
+    final now   = DateTime.now();
     final local = dt.toLocal();
     final isToday = local.year == now.year &&
         local.month == now.month &&
@@ -276,7 +362,8 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
   // ===========================================================================
 
   Widget _buildTile(ChatConversation conv) {
-    final name     = _sanitize(conv.otherUserName ?? conv.otherUserId);
+    final rawName  = conv.otherUserName ?? conv.otherUserId;
+    final name     = _sanitize(rawName);
     final avatar   = conv.otherUserAvatar;
     final selected = _selectedIds.contains(conv.id);
 
@@ -312,7 +399,7 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
           return;
         }
 
-        // Mark as read via OpenIM (updates local SQLite + server)
+        // Mark as read via OpenIM
         await _chat.markConversationAsRead(conv.id);
 
         if (mounted) {
@@ -382,7 +469,7 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
       color: const Color(0xFF4DA3FF),
       backgroundColor: Colors.transparent,
       onRefresh: () async {
-        // Re-fetch from OpenIM local SQLite + server sync
+        await _loadSavedContacts();
         await _chat.fetchConversations();
         await _retryEnrichment();
       },
@@ -418,11 +505,25 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
           : Padding(
               padding: EdgeInsets.only(bottom: bottomInset + 80.0),
               child: FloatingActionButton(
-                onPressed: () => Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                      builder: (_) => const FirebaseNewChatScreen()),
-                ),
+                // ── FIX: await the push so we can reload contacts on return ──
+                onPressed: () async {
+                  await Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => const FirebaseNewChatScreen(),
+                    ),
+                  );
+                  // Reload contacts fresh (static cache was busted by
+                  // ContactService.invalidateFirestoreCache() on save)
+                  // then re-enrich so the new contact name shows immediately.
+                  if (mounted) {
+                    await _loadSavedContacts();
+                    final enriched = await _enrichNames(_conversations);
+                    if (mounted) {
+                      setState(() => _conversations = enriched);
+                    }
+                  }
+                },
                 backgroundColor: const Color(0xFF4DA3FF),
                 child: const Icon(Icons.edit_square, color: Colors.black),
               ),

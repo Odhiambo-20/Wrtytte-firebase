@@ -13,31 +13,20 @@ class RealNumberRegisterResult {
   final String userId;
   final String secret;
 
+  /// True  → brand-new account (must set profile name)
+  /// False → existing account   (go straight to HomeScreen)
+  final bool isNewUser;
+
   RealNumberRegisterResult({
     required this.username,
     required this.userId,
     required this.secret,
+    required this.isNewUser,
   });
 }
 
 // =============================================================================
 //  RealNumberService
-//
-//  Handles phone-based registration and login for ALL countries worldwide.
-//
-//  Flow:
-//    1. sendSmsCode()       — calls /account/code/send (usedFor=1) to init
-//                             a verification session on the server.
-//                             REQUIRED even with super-code 666666.
-//    2. registerRealPhone() —
-//         a. Parse fullPhone into areaCode + localNumber (longest-match).
-//         b. Call /account/code/send (usedFor=1) to init session.
-//         c. POST /account/register  (new user)
-//            → on failure (20004 = already registered):
-//              call /account/code/send (usedFor=2) then POST /account/login
-//         d. Persist session tokens via AuthService.
-//         e. Log into OpenIM SDK via AuthService (fire-and-forget).
-//         f. Return result so OtpVerificationPage can navigate forward.
 // =============================================================================
 class RealNumberService {
   RealNumberService();
@@ -46,8 +35,6 @@ class RealNumberService {
 
   // ---------------------------------------------------------------------------
   //  STEP 1 — "Send OTP"
-  //  Calls /account/code/send to initialize a verification session.
-  //  The server requires this before it will accept 666666 on register/login.
   // ---------------------------------------------------------------------------
   Future<void> sendSmsCode(String fullPhone) async {
     debugPrint('[RealNumberService] sendSmsCode → $fullPhone');
@@ -73,21 +60,19 @@ class RealNumberService {
 
   // ---------------------------------------------------------------------------
   //  STEP 2 — Register or login
+  //
+  //  Returns [RealNumberRegisterResult] with [isNewUser] = true  for first-time
+  //  signups, and [isNewUser] = false for returning users.
   // ---------------------------------------------------------------------------
   Future<RealNumberRegisterResult> registerRealPhone({
     required String fullPhone,
-    required String code,     // ignored — server uses super-code 666666
+    required String code,
     String nickname = '',
     bool login = true,
   }) async {
     debugPrint('[RealNumberService] registerRealPhone → "$fullPhone"');
 
     // ── 1. Parse dial code ───────────────────────────────────────────────────
-    //
-    // _splitFullPhone tries prefixes of length 1–4 and keeps the LONGEST
-    // matching dial code so the most-specific country always wins.
-    // e.g. "1876…" → Jamaica +1876, not USA +1
-
     final split = _splitFullPhone(fullPhone);
 
     final String areaCode;
@@ -112,10 +97,6 @@ class RealNumberService {
     final displayName = nickname.isNotEmpty ? nickname : fullPhone;
 
     // ── 2. Init verification session for register (usedFor=1) ────────────────
-    //
-    // /account/code/send MUST be called before /account/register.
-    // Without it the server returns errCode 1001 (ArgsError) even with
-    // the super-code 666666 configured in chat.yaml.
     await _sendVerificationSession(
       areaCode:    areaCode,
       phoneNumber: phoneNumber,
@@ -123,11 +104,8 @@ class RealNumberService {
     );
 
     // ── 3. Register (new user) — fall back to login (returning user) ─────────
-    //
-    // Try register first. If errCode 20004 (AccountAlreadyRegister), re-init
-    // session with usedFor=2 and attempt login instead.
-
     OpenIMRegisterResult result;
+    bool isNewUser;
 
     try {
       result = await OpenIMChatService.instance.registerWithPhone(
@@ -135,6 +113,7 @@ class RealNumberService {
         phoneNumber: phoneNumber,
         nickname:    displayName,
       );
+      isNewUser = true; // ← brand-new account
       debugPrint('[RealNumberService] Registered new user: ${result.userID}');
     } on OpenIMChatException catch (e) {
       debugPrint(
@@ -142,18 +121,17 @@ class RealNumberService {
         '— retrying as login',
       );
 
-      // Re-init session for login (usedFor=2) — required by the server
       await _sendVerificationSession(
         areaCode:    areaCode,
         phoneNumber: phoneNumber,
         usedFor:     2,
       );
 
-      // Login uses FLAT fields (no "user" wrapper) — confirmed via curl
       result = await OpenIMChatService.instance.loginWithPhone(
         areaCode:    areaCode,
         phoneNumber: phoneNumber,
       );
+      isNewUser = false; // ← returning user
       debugPrint('[RealNumberService] Logged in existing user: ${result.userID}');
     }
 
@@ -167,8 +145,6 @@ class RealNumberService {
         chatToken: result.chatToken,
       );
 
-      // Fire-and-forget — do NOT await. SDK connects in the background.
-      // Navigation happens immediately after this method returns.
       AuthService.instance.loginToOpenIM(
         userId:   result.userID,
         nickname: displayName,
@@ -179,21 +155,15 @@ class RealNumberService {
     }
 
     return RealNumberRegisterResult(
-      username: displayName,
-      userId:   result.userID,
-      secret:   result.userID,
+      username:  displayName,
+      userId:    result.userID,
+      secret:    result.userID,
+      isNewUser: isNewUser, // ← passed through to OtpVerificationPage
     );
   }
 
   // ---------------------------------------------------------------------------
   //  _sendVerificationSession
-  //
-  //  POST /account/code/send
-  //  Initializes a verification session on the OpenIM chat server.
-  //  Must be called before /account/register or /account/login.
-  //  Errors are logged but never rethrown — auth flow always continues.
-  //
-  //  usedFor: 1 = register, 2 = login / reset password
   // ---------------------------------------------------------------------------
   Future<void> _sendVerificationSession({
     required String areaCode,
@@ -233,10 +203,6 @@ class RealNumberService {
 
   // ---------------------------------------------------------------------------
   //  _splitFullPhone
-  //
-  //  Strips non-digits from fullPhone then tries every prefix of length 1–4
-  //  against the countries list. The LONGEST match wins so that e.g.
-  //  Caribbean numbers (+1876) are not swallowed by the generic +1 (USA).
   // ---------------------------------------------------------------------------
   _PhoneParts? _splitFullPhone(String fullPhone) {
     final digits = fullPhone.replaceAll(RegExp(r'[^\d]'), '');
