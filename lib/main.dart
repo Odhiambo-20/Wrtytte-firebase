@@ -162,8 +162,11 @@ class WrytteApp extends StatelessWidget {
           );
         },
 
+        //'/add_profile':
+            //(context) => const ThemeWrapper(child: AddProfilePage()),
+
         '/add_profile':
-            (context) => const ThemeWrapper(child: AddProfilePage()),
+           (context) => const ThemeWrapper(child: AddProfilePage(isNewUser: true)),
 
         '/home': (context) => const ThemeWrapper(child: AuthWrapper()),
 

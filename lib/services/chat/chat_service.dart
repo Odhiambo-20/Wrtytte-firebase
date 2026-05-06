@@ -317,6 +317,10 @@ class ChatService {
     }
   }
 
+
+  //Before
+  /*
+
   Future<void> disconnect() async {
     if (!_isConnected) return;
     _isConnected = false;
@@ -324,6 +328,29 @@ class ChatService {
     _connectionController.add(false);
     debugPrint('[ChatService] Disconnected');
   }
+
+  */
+
+
+  //After
+  Future<void> disconnect() async {
+  if (!_isConnected) return;
+  await reset();
+  }
+
+/// Clears all in-memory state so a new user can connect cleanly.
+/// Called on logout before OpenIM logout wipes the local SQLite DB.
+  Future<void> reset() async {
+    _isConnected = false;
+    _initialized = false;
+    _currentUserId = null;
+    _conversationsMap.clear();
+    _messagesCache.clear();
+    _connectionController.add(false);
+    debugPrint('[ChatService] Reset — ready for new user');
+  }
+
+
 
   void dispose() {
     disconnect();

@@ -91,7 +91,8 @@ class _EmailVerificationPageState extends State<EmailVerificationPage>
 
       Navigator.pushAndRemoveUntil(
         context,
-        MaterialPageRoute(builder: (_) => const AddProfilePage()),
+        //MaterialPageRoute(builder: (_) => const AddProfilePage()),
+        MaterialPageRoute(builder: (_) => const AddProfilePage(isNewUser: true)),
         (_) => false,
       );
     } catch (e) {

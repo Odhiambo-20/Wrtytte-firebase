@@ -8,6 +8,7 @@ import 'package:flutter_openim_sdk/flutter_openim_sdk.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 import 'package:wrytte/models/auth_models/auth_user.dart';
+import 'package:wrytte/services/chat/chat_service.dart';
 
 /// Central authentication service.
 ///
@@ -400,7 +401,7 @@ class AuthService {
   // ============================================================================
   // PUBLIC: Logout
   // ============================================================================
-
+  /*
   Future<void> logout() async {
     await logoutFromOpenIM();
     try {
@@ -410,6 +411,27 @@ class AuthService {
     }
     await _storage.deleteAll();
   }
+
+  */
+
+
+  Future<void> logout() async {
+    // 1. Clear ChatService in-memory state FIRST (before OpenIM wipes SQLite)
+    await ChatService().reset();
+    // 2. Log out of OpenIM — clears its local SQLite DB for this user
+    await logoutFromOpenIM();
+    // 3. Sign out of Firebase
+    try {
+      await _firebaseAuth.signOut();
+    } catch (e) {
+      debugPrint('[AuthService] Firebase sign-out error: $e');
+    }
+    // 4. Wipe all secure storage tokens
+    await _storage.deleteAll();
+    debugPrint('[AuthService] logout complete');
+  }
+
+
 
   Future<void> signOutFirebase() async {
     try {
