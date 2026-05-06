@@ -596,10 +596,14 @@ class AuthService {
         if (!snapshot.exists) 'createdAt': now,
         if (phone != null && phone.isNotEmpty)
           'phone': _normalizePhone(phone),
+        // AFTER: This permanently sets the username on first login.  Future logins with different usernames will be ignored to avoid confusion and abuse.  The username can still be changed manually in Firestore if needed.
         if (username != null && username.isNotEmpty) ...{
           'username': username,
-          'name': existing['name'] ?? username,
+          if ((existing['name'] == null || (existing['name'] as String).isEmpty) &&
+              !_looksLikePhone(username))
+            'name': username,
         },
+
         if (firebaseUid != null) 'firebaseUid': firebaseUid,
         'isOnline': true,
         'lastSeen': now,
@@ -636,5 +640,9 @@ class AuthService {
     if (cleaned.startsWith('00')) cleaned = '+${cleaned.substring(2)}';
     if (!cleaned.startsWith('+')) cleaned = '+$cleaned';
     return cleaned;
+  }
+  bool _looksLikePhone(String value) {
+    final s = value.replaceAll(RegExp(r'[\s\-()+]'), '');
+    return RegExp(r'^\d{6,}$').hasMatch(s);
   }
 }

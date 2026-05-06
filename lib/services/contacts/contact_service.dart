@@ -313,6 +313,14 @@ Future<Contact> saveManualContact({
   final displayName = '$firstName $lastName'.trim();
   final isWrytteContact = wrytteUserId != null && wrytteUserId.isNotEmpty;
 
+
+  /*  
+  
+  ✅ FIXED: Do NOT write to device contacts. Instead, if this is a Wrytte contact, add as friend via OpenIM API.
+   This keeps the contact management within Wrytte and avoids polluting the user's phonebook with entries they didn't explicitly add there.
+  
+
+
   if (isWrytteContact) {
     if (selfUserId == null || selfUserId.isEmpty) {
       throw Exception('Could not resolve your user ID. Please log in again.');
@@ -324,6 +332,8 @@ Future<Contact> saveManualContact({
       token: token,
     );
   }
+
+  */
 
 
   final contact = Contact(

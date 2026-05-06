@@ -268,6 +268,8 @@ class _NewContactPageState extends State<NewContactPage> {
     try {
       final String selfId = await AuthService.instance.getCurrentUserId() ?? '';
       debugPrint('🧑 selfUserId in _save: $selfId');
+      debugPrint('identifier=$_fullIdentifier');
+      debugPrint('resolvedUserId=$_resolvedUserId');
       final saved = await _contactService.saveManualContact(
         firstName: _firstNameCtrl.text.trim(),
         lastName: _lastNameCtrl.text.trim(),
@@ -301,7 +303,8 @@ class _NewContactPageState extends State<NewContactPage> {
       if (!mounted) return;
       setState(() {
         _isSaving = false;
-        _saveError = _friendlyError(e.toString());
+        //_saveError = _friendlyError(e.toString());
+         _saveError = e.toString();
       });
     }
   }

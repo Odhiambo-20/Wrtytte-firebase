@@ -1,680 +1,694 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
-import 'package:url_launcher/url_launcher.dart';
-import 'dart:ui';
-import 'package:wrytte/components/user_avatar.dart';
-import 'package:wrytte/models/user_models/user_profile_service.dart';
-import 'package:wrytte/services/user/user_profile_service.dart';
-import 'package:wrytte/ui/widgets/profile_tab_bar_section.dart';
-import 'edit_profile_screen.dart';
+import 'package:flutter/services.dart';
+import 'package:wrytte/models/contact_model.dart';
+import 'package:wrytte/services/auth/auth_service.dart';
+import 'package:wrytte/services/contacts/contact_service.dart';
+import 'package:wrytte/services/contacts/user_search_service.dart';
+import 'package:wrytte/ui/screens/Country%20id%20picker%20page.dart';
+import 'package:wrytte/utils/countries_id.dart';
+import 'package:wrytte/ui/screens/chats/chat_screen.dart';
 
-class ProfileScreen extends StatefulWidget {
-  /// When null — shows the current logged-in user's own profile.
-  /// When provided — shows another user's profile (read-only).
-  final String? uid;
+// ─────────────────────────────────────────────────────────────────
+// Colours
+// ─────────────────────────────────────────────────────────────────
+const _kBg = Color(0xFF08090B);
+const _kCard = Color(0xFF23262C);
+const _kBlue = Color(0xFF4DA3FF);
+const _kDivider = Colors.white12;
 
-  const ProfileScreen({super.key, this.uid});
+// ─────────────────────────────────────────────────────────────────
+// Enum for the three possible lookup states
+// ─────────────────────────────────────────────────────────────────
+enum _LookupState { idle, found, duplicate, notFound }
+
+class NewContactPage extends StatefulWidget {
+  /// Bearer token for the UserSearchService call.
+  final String token;
+
+  const NewContactPage({super.key, required this.token});
 
   @override
-  State<ProfileScreen> createState() => _ProfileScreenState();
+  State<NewContactPage> createState() => _NewContactPageState();
 }
 
-class _ProfileScreenState extends State<ProfileScreen>
-    with SingleTickerProviderStateMixin {
-  bool _bioExpanded = false;
-  bool _linksExpanded = false;
+class _NewContactPageState extends State<NewContactPage> {
+  // ── Controllers & focus ──────────────────────────────────────
+  final _firstNameCtrl = TextEditingController();
+  final _lastNameCtrl = TextEditingController();
+  final _codeCtrl = TextEditingController();
+  final _numberCtrl = TextEditingController();
 
-  UserProfile? _profile;
-  bool _profileLoading = true;
+  final _codeFocusNode = FocusNode();
+  final _numberFocusNode = FocusNode();
 
-  late final TabController _tabController;
+  // ── Country ───────────────────────────────────────────────────
+  CountryId? _selectedCountry;
+  bool _showDivider = false;
+  bool _isAutoFilling = false;
 
-  bool get _isOtherUser =>
-      widget.uid != null &&
-      widget.uid != UserProfileService.instance.cachedProfile?.uid;
+  // ── Sync toggle ───────────────────────────────────────────────
+  bool _syncToPhone = true;
 
-  List<String> get _tabs =>
-      _isOtherUser ? ['Media', 'Files', 'Feed', 'Links'] : ['Posts', 'Saved'];
+  // ── Lookup ────────────────────────────────────────────────────
+  final UserSearchService _searchService = UserSearchService();
+  final ContactService _contactService = ContactService();
+  Timer? _debounce;
+  _LookupState _lookupState = _LookupState.idle;
+  bool _isWrytteId = false;
 
+  /// The wrytteUserId returned by the lookup — needed for addFriend.
+  String? _resolvedUserId;
+
+  // ── Saving ────────────────────────────────────────────────────
+  bool _isSaving = false;
+  String? _saveError;
+
+  // ─────────────────────────────────────────────────────────────
+  // Computed helpers
+  // ─────────────────────────────────────────────────────────────
+  bool get _isWrytteIdMode => _selectedCountry?.isoCode == 'WID';
+
+  String get _fullIdentifier {
+    if (_selectedCountry == null) return '';
+    final raw = _numberCtrl.text.trim();
+    if (_isWrytteIdMode) return raw;
+    final normalized = raw.startsWith('0') ? raw.substring(1) : raw;
+    return '+${_selectedCountry!.dialCode}$normalized';
+  }
+
+  bool get _canSave =>
+      _firstNameCtrl.text.trim().isNotEmpty &&
+      _selectedCountry != null &&
+      _numberCtrl.text.trim().length >= 4;
+
+  // ─────────────────────────────────────────────────────────────
+  // Lifecycle
+  // ─────────────────────────────────────────────────────────────
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: _tabs.length, vsync: this);
-    _loadProfile();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _codeCtrl.text = '+';
+      _codeCtrl.selection = TextSelection.fromPosition(
+        const TextPosition(offset: 1),
+      );
+      _codeFocusNode.requestFocus();
+    });
+    _numberCtrl.addListener(_onNumberChanged);
+    _firstNameCtrl.addListener(() => setState(() {}));
   }
 
   @override
   void dispose() {
-    _tabController.dispose();
+    _firstNameCtrl.dispose();
+    _lastNameCtrl.dispose();
+    _codeCtrl.dispose();
+    _numberCtrl.dispose();
+    _codeFocusNode.dispose();
+    _numberFocusNode.dispose();
+    _debounce?.cancel();
     super.dispose();
   }
 
-  Future<void> _loadProfile() async {
-    final profile =
-        widget.uid != null
-            ? await UserProfileService.instance.getProfileByUid(widget.uid!)
-            : await UserProfileService.instance.getCurrentUserProfile();
-
-    if (!mounted) return;
-    setState(() {
-      _profile = profile;
-      _profileLoading = false;
-    });
-  }
-
-  String _formatPhone(String phone) {
-    final digits = phone.replaceAll(RegExp(r'[^\d+]'), '');
-    if (digits.startsWith('+256') && digits.length == 13) {
-      return '${digits.substring(0, 4)} ${digits.substring(4, 7)} ${digits.substring(7, 10)} ${digits.substring(10)}';
-    }
-    if (digits.startsWith('+1') && digits.length == 12) {
-      return '${digits.substring(0, 2)} ${digits.substring(2, 5)} ${digits.substring(5, 8)} ${digits.substring(8)}';
-    }
-    return phone;
-  }
-
-  Future<void> _launchLink(String url) async {
-    final raw = url.trim();
-    final uri = Uri.parse(
-      raw.startsWith('http://') || raw.startsWith('https://')
-          ? raw
-          : 'https://$raw',
+  // ─────────────────────────────────────────────────────────────
+  // Country picker
+  // ─────────────────────────────────────────────────────────────
+  Future<void> _pickCountry() async {
+    final result = await Navigator.of(context).push<CountryId>(
+      MaterialPageRoute(builder: (_) => const CountryIdPickerPage()),
     );
-    if (await canLaunchUrl(uri)) {
-      await launchUrl(uri, mode: LaunchMode.externalApplication);
+
+    if (result != null) {
+      setState(() {
+        _selectedCountry = result;
+        _isWrytteId = result.isoCode == 'WID';
+        _codeCtrl.text = '+${result.dialCode}';
+        _showDivider = true;
+        _lookupState = _LookupState.idle;
+        _resolvedUserId = null;
+        _saveError = null;
+      });
+      _numberFocusNode.requestFocus();
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Auto-detect country from typed code
+  // ─────────────────────────────────────────────────────────────
+  void _detectCountryFromCode(String value) {
+    if (_isAutoFilling) return;
+
+    final digitsOnly = value.replaceAll(RegExp(r'[^\d]'), '');
+    if (!value.startsWith('+') || value != '+$digitsOnly') {
+      _codeCtrl.text = '+$digitsOnly';
+      _codeCtrl.selection = TextSelection.fromPosition(
+        TextPosition(offset: _codeCtrl.text.length),
+      );
+    }
+
+    final codeWithoutPlus = digitsOnly;
+
+    for (final country in countriesId) {
+      if (country.dialCode == codeWithoutPlus) {
+        setState(() {
+          _selectedCountry = country;
+          _isWrytteId = false;
+          _showDivider = true;
+          _lookupState = _LookupState.idle;
+          _resolvedUserId = null;
+        });
+
+        if (!_isAutoFilling && codeWithoutPlus.isNotEmpty) {
+          _isAutoFilling = true;
+          Future.delayed(const Duration(milliseconds: 100), () {
+            _numberFocusNode.requestFocus();
+            _isAutoFilling = false;
+          });
+        }
+        break;
+      }
+    }
+  }
+
+  void _onCodeFieldTap() {
+    if (_codeCtrl.text.isEmpty) {
+      _codeCtrl.text = '+';
+      _codeCtrl.selection =
+          const TextSelection.collapsed(offset: 1);
+    } else if (!_codeCtrl.text.startsWith('+')) {
+      _codeCtrl.text = '+${_codeCtrl.text}';
+      _codeCtrl.selection = TextSelection.fromPosition(
+        TextPosition(offset: _codeCtrl.text.length),
+      );
     } else {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Could not open $raw'),
-          backgroundColor: const Color(0xFF23262C),
-        ),
+      _codeCtrl.selection = TextSelection.fromPosition(
+        TextPosition(offset: _codeCtrl.text.length),
       );
     }
   }
 
-  static const TextStyle _bioStyle = TextStyle(
-    color: Colors.white,
-    fontSize: 14,
-    height: 1.4,
-  );
+  // ─────────────────────────────────────────────────────────────
+  // Number field → debounced lookup
+  // ─────────────────────────────────────────────────────────────
+  void _onNumberChanged() {
+    setState(() {
+      _lookupState = _LookupState.idle;
+      _resolvedUserId = null;
+      _saveError = null;
+    });
+    _debounce?.cancel();
 
-  bool get _hasCard {
-    final bio = _profile?.bio ?? '';
-    final links = _profile?.links ?? [];
-    return bio.isNotEmpty || links.isNotEmpty;
+    final num = _numberCtrl.text.trim();
+    if (_selectedCountry == null || num.length < 4) return;
+
+    _debounce = Timer(const Duration(milliseconds: 600), _lookupUser);
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final double statusBarHeight = MediaQuery.of(context).padding.top;
-    final double topBarHeight = statusBarHeight + kToolbarHeight;
+  Future<void> _lookupUser() async {
+    final freshToken = await AuthService.instance.getOpenImToken() ?? widget.token;
+    debugPrint('🔍 _lookupUser called, identifier: $_fullIdentifier');
+    final identifier = _fullIdentifier;
+    if (identifier.isEmpty) return;
 
-    final String displayName =
-        _profileLoading ? '...' : (_profile?.displayName ?? 'User');
-    final String phone =
-        _profileLoading ? '' : _formatPhone(_profile?.phone ?? '');
-    final String bioText = _profile?.bio ?? '';
-    final List<String> links = _profile?.links ?? [];
+    try {
+      debugPrint("🔑 token: ${freshToken.isEmpty ? "EMPTY" : freshToken.substring(0, freshToken.length.clamp(0, 20))}");
+      final Map<String, String> result;
 
-    return Scaffold(
-      backgroundColor: const Color(0xFF08090B),
-      extendBodyBehindAppBar: true,
-      body: Stack(
-        children: [
-          NestedScrollView(
-            physics: const BouncingScrollPhysics(
-              parent: AlwaysScrollableScrollPhysics(),
-            ),
-            headerSliverBuilder:
-                (context, innerBoxIsScrolled) => [
-                  SliverToBoxAdapter(
-                    child: Column(
-                      children: [
-                        SizedBox(height: topBarHeight + 20),
+      if (_isWrytteIdMode) {
+        result = await _searchService.searchUsersByPhones(
+          phoneNumbersC: identifier,
+          token: freshToken,
+        );
+      } else {
+        result = await _searchService.searchUsersByPhones(
+          phoneNumbersA: [identifier],
+          token: freshToken,
+        );
+      }
 
-                        // ── Avatar ──────────────────────────────────────────
-                        _profileLoading
-                            ? _buildAvatarShimmer(100)
-                            : UserAvatar(
-                              size: 100,
-                              imageUrl:
-                                  _profile?.hasProfileImage == true
-                                      ? _profile!.profileImage
-                                      : null,
-                              name: _profile?.displayName,
-                            ),
+      debugPrint('Lookup result keys: ${result.keys.toList()}');
+      debugPrint('Looking for identifier: $identifier');
 
-                        const SizedBox(height: 12),
+      if (!mounted) return;
 
-                        // ── Name ────────────────────────────────────────────
-                        Text(
-                          displayName,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 22,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-
-                        const SizedBox(height: 4),
-
-                        // ── Phone ───────────────────────────────────────────
-                        if (phone.isNotEmpty)
-                          Text(
-                            phone,
-                            style: const TextStyle(
-                              color: Color(0xFF4DA3FF),
-                              fontSize: 16,
-                            ),
-                          ),
-
-                        const SizedBox(height: 16),
-
-                        // ── Quick actions (other user only) ─────────────────
-                        if (_isOtherUser) ...[
-                          _buildQuickActions(),
-                          const SizedBox(height: 16),
-                        ],
-
-                        // ── Bio + links card (only when content exists) ─────
-                        if (!_profileLoading && _hasCard) ...[
-                          Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 16),
-                            child: Container(
-                              padding: const EdgeInsets.all(14),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFF23262C),
-                                borderRadius: BorderRadius.circular(14),
-                              ),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  if (bioText.isNotEmpty) _buildBio(bioText),
-                                  if (links.isNotEmpty) ...[
-                                    if (bioText.isNotEmpty)
-                                      const SizedBox(height: 10),
-                                    _buildLinks(links),
-                                  ],
-                                ],
-                              ),
-                            ),
-                          ),
-                          const SizedBox(height: 20),
-                        ],
-
-                        if (_profileLoading || !_hasCard)
-                          const SizedBox(height: 4),
-                      ],
-                    ),
-                  ),
-
-                  // ── Sticky tab bar — pins just below the top app bar ──────
-                  SliverPersistentHeader(
-                    pinned: true,
-                    delegate: _StickyTabBarDelegate(
-                      topOffset: topBarHeight,
-                      child: Container(
-                        color: const Color(0xFF08090B),
-                        child: ProfileTabBarSection(
-                          controller: _tabController,
-                          tabs: _tabs,
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-            body: TabBarView(
-              controller: _tabController,
-              physics: const BouncingScrollPhysics(),
-              children:
-                  _isOtherUser
-                      ? [
-                        _buildEmptyTab(
-                          Icons.photo_library_outlined,
-                          'No media',
-                        ),
-                        _buildEmptyTab(
-                          Icons.insert_drive_file_outlined,
-                          'No files',
-                        ),
-                        _buildEmptyTab(Icons.dynamic_feed_outlined, 'No feed'),
-                        _buildEmptyTab(Icons.link_outlined, 'No links'),
-                      ]
-                      : [_buildPostsTab(), _buildSavedTab()],
-            ),
-          ),
-
-          // ── Top gradient scrim ────────────────────────────────────────
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            height: topBarHeight + 20,
-            child: IgnorePointer(
-              child: Container(
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                    stops: const [0.0, 0.6, 1.0],
-                    colors: [
-                      const Color(0xFF08090B).withOpacity(0.95),
-                      const Color(0xFF08090B).withOpacity(0.75),
-                      const Color(0xFF08090B).withOpacity(0.0),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ),
-
-          // ── Top bar ───────────────────────────────────────────────────
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            child: Padding(
-              padding: EdgeInsets.only(top: statusBarHeight),
-              child: SizedBox(
-                height: kToolbarHeight,
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 4),
-                  child: Row(
-                    children: [
-                      // ── Back button ──────────────────────────────────
-                      _glassButton(
-                        icon: Icons.arrow_back_ios,
-                        onTap: () => Navigator.pop(context),
-                      ),
-
-                      // ── Title — only shown for own profile, truly centered ─
-                      Expanded(
-                        child:
-                            _isOtherUser
-                                ? const SizedBox.shrink()
-                                : const Center(
-                                  child: Text(
-                                    "Profile",
-                                    style: TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 20,
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                                  ),
-                                ),
-                      ),
-
-                      // ── Edit / action button ─────────────────────────
-                      _glassTextButton(
-                        // CHANGE 1: Edit text is always white
-                        text: "Edit",
-                        onTap:
-                            _isOtherUser
-                                ? () {}
-                                : () {
-                                  Navigator.push(
-                                    context,
-                                    MaterialPageRoute(
-                                      builder: (_) => const EditProfileScreen(),
-                                    ),
-                                  );
-                                },
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
+      if (result.containsKey(identifier)) {
+        setState(() {
+          _lookupState = _LookupState.found;
+          _resolvedUserId = result[identifier];
+        });
+      } else {
+        setState(() {
+          _lookupState = _LookupState.notFound;
+          _resolvedUserId = null;
+        });
+      }
+    } catch (e) {
+      debugPrint('🔴 Lookup error: $e');
+      if (!mounted) return;
+      setState(() {
+        _lookupState = _LookupState.idle;
+        _resolvedUserId = null;
+      });
+    }
   }
 
-  // ── Quick actions — solid background, no glass ────────────────────────────
-  // CHANGE 3: Solid 0xFF23262C, no blur/opacity
+  // ─────────────────────────────────────────────────────────────
+  // Save — now fully wired to OpenIM + device contacts
+  // ─────────────────────────────────────────────────────────────
+  Future<void> _save() async {
+    if (!_canSave || _isSaving) return;
 
-  Widget _buildQuickActions() {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Expanded(
-            child: _actionPill(Icons.call_outlined, 'Calls', onTap: () {}),
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: _actionPill(Icons.videocam_outlined, 'Video', onTap: () {}),
-          ),
-          const SizedBox(width: 10),
-          Expanded(child: _actionPill(Icons.search, 'Search', onTap: () {})),
-          const SizedBox(width: 10),
-          Expanded(child: _actionPill(Icons.more_horiz, 'More', onTap: () {})),
-        ],
-      ),
-    );
-  }
+    setState(() {
+      _isSaving = true;
+      _saveError = null;
+    });
 
-  Widget _actionPill(IconData icon, String label, {VoidCallback? onTap}) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        decoration: BoxDecoration(
-          // CHANGE 3: Solid color, no transparency, no BackdropFilter
-          color: const Color(0xFF23262C),
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: const Color(0xFF23262C), width: 1.0),
+    try {
+      final String selfId = await AuthService.instance.getCurrentUserId() ?? '';
+      debugPrint('🧑 selfUserId in _save: $selfId');
+      final saved = await _contactService.saveManualContact(
+        firstName: _firstNameCtrl.text.trim(),
+        lastName: _lastNameCtrl.text.trim(),
+        fullIdentifier: _fullIdentifier,
+        wrytteUserId: _resolvedUserId,
+        syncToPhone: _syncToPhone,
+        token: await AuthService.instance.getOpenImToken() ?? widget.token,
+        selfUserId: selfId,
+      );
+
+      if (!mounted) return;
+
+      final receiverId = saved.wrytteUserId ?? '';
+      final conversationId = ([selfId, receiverId]..sort()).join('_');
+
+      // Always navigate to chat — whether on Wrytte or not
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+          builder: (_) => ChatScreen(
+            conversationId: conversationId,
+            receiverId: receiverId.isNotEmpty ? receiverId : _fullIdentifier,
+            currentUserId: selfId,
+            title: saved.formattedName,
+            avatarUrl: saved.avatarUrl,
+          ),
         ),
-        padding: const EdgeInsets.symmetric(vertical: 12),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
+      );
+    } catch (e) {
+      debugPrint('Save contact error: $e');
+      if (!mounted) return;
+      setState(() {
+        _isSaving = false;
+        _saveError = _friendlyError(e.toString());
+      });
+    }
+  }
+
+  String _friendlyError(String raw) {
+    if (raw.contains('1201')) return 'You are already friends with this user.';
+    if (raw.contains('permission')) return 'Phone contacts permission denied.';
+    if (raw.contains('not authenticated')) return 'Session expired — please log in again.';
+    return 'Something went wrong. Please try again.';
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Status line below the number card
+  // ─────────────────────────────────────────────────────────────
+  Widget _buildStatusLine() {
+    // Show a persistent error if saving failed
+    if (_saveError != null) {
+      return Padding(
+        padding: const EdgeInsets.only(top: 6),
+        child: Text(
+          _saveError!,
+          style: const TextStyle(color: Colors.redAccent, fontSize: 13),
+        ),
+      );
+    }
+
+    if (_lookupState == _LookupState.idle) return const SizedBox.shrink();
+
+    final bool isWrytteId = _isWrytteIdMode;
+
+    Widget _row(String text, {bool checkmark = false, Widget? trailing}) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 2),
+        child: Row(
           children: [
-            Icon(icon, color: Colors.white, size: 24),
-            const SizedBox(height: 5),
             Text(
-              label,
-              style: TextStyle(
-                color: Colors.white.withOpacity(0.75),
-                fontSize: 12,
-                fontWeight: FontWeight.w400,
-              ),
+              text,
+              style: const TextStyle(color: Colors.white54, fontSize: 13),
             ),
+            if (checkmark) ...[
+              const SizedBox(width: 4),
+              const Text(
+                '✓',
+                style: TextStyle(color: Colors.green, fontSize: 13),
+              ),
+            ],
+            if (trailing != null) trailing,
           ],
         ),
-      ),
-    );
-  }
-
-  // ── Own profile tab content ────────────────────────────────────────────────
-
-  Widget _buildPostsTab() {
-    return ListView(
-      padding: const EdgeInsets.only(top: 40, bottom: 120),
-      // CHANGE 4: Bouncing physics so empty tabs have iOS-style spring bounce
-      // without scrolling the header content away
-      physics: const BouncingScrollPhysics(),
-      children: [
-        const Text(
-          "Publish photo and video to\ndisplay on your profile page",
-          textAlign: TextAlign.center,
-          style: TextStyle(color: Colors.white, fontSize: 11),
-        ),
-        const SizedBox(height: 6),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 120),
-          child: ElevatedButton(
-            onPressed: () {},
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF4DA3FF),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12),
-              ),
-            ),
-            child: const Text(
-              "Add storie",
-              style: TextStyle(color: Colors.white, fontSize: 15),
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildSavedTab() {
-    // CHANGE 4: Wrap in a scrollable with bouncing physics so it feels iOS-native
-    // but won't fully scroll the header away when there's no data
-    return CustomScrollView(
-      physics: const BouncingScrollPhysics(),
-      slivers: [
-        SliverFillRemaining(
-          hasScrollBody: false,
-          child: const Center(
-            child: Text(
-              "No saved posts yet",
-              style: TextStyle(color: Colors.grey),
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  // ── Other user empty tab states ────────────────────────────────────────────
-  // CHANGE 4: Each empty tab is a CustomScrollView with SliverFillRemaining
-  // so it fills the space without allowing full header scroll-away,
-  // but retains the iOS bounce animation on over-scroll.
-
-  Widget _buildEmptyTab(IconData icon, String label) {
-    return CustomScrollView(
-      physics: const BouncingScrollPhysics(),
-      slivers: [
-        SliverFillRemaining(
-          hasScrollBody: false,
-          child: Center(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(icon, size: 52, color: Colors.white.withOpacity(0.15)),
-                const SizedBox(height: 12),
-                Text(
-                  label,
-                  style: TextStyle(
-                    color: Colors.white.withOpacity(0.35),
-                    fontSize: 15,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  // ── Avatar shimmer ─────────────────────────────────────────────────────────
-
-  Widget _buildAvatarShimmer(double size) {
-    return Container(
-      width: size,
-      height: size,
-      decoration: const BoxDecoration(
-        shape: BoxShape.circle,
-        color: Color(0xFF2A2D34),
-      ),
-    );
-  }
-
-  // ── Bio ────────────────────────────────────────────────────────────────────
-
-  Widget _buildBio(String bioText) {
-    if (_bioExpanded) {
-      return GestureDetector(
-        onTap: () => setState(() => _bioExpanded = false),
-        child: Text(bioText, style: _bioStyle),
       );
     }
 
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final fullPainter = TextPainter(
-          text: TextSpan(text: bioText, style: _bioStyle),
-          maxLines: 3,
-          textDirection: TextDirection.ltr,
-        )..layout(maxWidth: constraints.maxWidth);
-
-        if (!fullPainter.didExceedMaxLines) {
-          return Text(bioText, style: _bioStyle);
-        }
-
-        int lo = 0, hi = bioText.length;
-        while (lo < hi) {
-          final mid = (lo + hi + 1) ~/ 2;
-          final candidate = '${bioText.substring(0, mid).trimRight()}... more';
-          final p = TextPainter(
-            text: TextSpan(text: candidate, style: _bioStyle),
-            maxLines: 3,
-            textDirection: TextDirection.ltr,
-          )..layout(maxWidth: constraints.maxWidth);
-          if (p.didExceedMaxLines) {
-            hi = mid - 1;
-          } else {
-            lo = mid;
-          }
-        }
-
-        final visibleText = bioText.substring(0, lo).trimRight();
-
-        return GestureDetector(
-          onTap: () => setState(() => _bioExpanded = true),
-          child: Text.rich(
-            TextSpan(
-              style: _bioStyle,
-              children: [
-                TextSpan(text: visibleText),
-                const TextSpan(
-                  text: '... ',
-                  style: TextStyle(color: Colors.white),
-                ),
-                const TextSpan(
-                  text: 'read more',
-                  style: TextStyle(color: Color(0xFF4DA3FF)),
-                ),
-              ],
-            ),
-            maxLines: 3,
+    switch (_lookupState) {
+      case _LookupState.found:
+        return Padding(
+          padding: const EdgeInsets.only(top: 6),
+          child: _row(
+            isWrytteId
+                ? 'Wrytte number is on Wrytte'
+                : 'Phone number is on Wrytte',
+            checkmark: true,
           ),
         );
-      },
-    );
-  }
 
-  // ── Links ──────────────────────────────────────────────────────────────────
-
-  Widget _buildLinks(List<String> links) {
-    final firstLink = links[0];
-    final hasMore = links.length > 1;
-    final remainingCount = links.length - 1;
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        GestureDetector(
-          onTap: () => _launchLink(firstLink),
-          child: Row(
+      case _LookupState.duplicate:
+        return Padding(
+          padding: const EdgeInsets.only(top: 6),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Icon(Icons.link, color: Color(0xFF4DA3FF), size: 16),
-              const SizedBox(width: 6),
-              Expanded(
-                child: Text(
-                  firstLink,
-                  style: const TextStyle(
-                    color: Color(0xFF4DA3FF),
-                    fontSize: 14,
+              _row(
+                isWrytteId
+                    ? 'Wrytte number is already in your contacts.'
+                    : 'Phone number is already in your contacts.',
+                trailing: TextButton(
+                  onPressed: () {
+                    // TODO: navigate to existing contact
+                  },
+                  style: TextButton.styleFrom(
+                    padding: EdgeInsets.zero,
+                    minimumSize: Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                   ),
-                  overflow: TextOverflow.ellipsis,
-                  maxLines: 1,
+                  child: const Text(
+                    ' View contact',
+                    style: TextStyle(color: _kBlue, fontSize: 13),
+                  ),
                 ),
               ),
-              if (hasMore && !_linksExpanded) ...[
-                const SizedBox(width: 6),
-                GestureDetector(
-                  onTap: () => setState(() => _linksExpanded = true),
-                  child: Text(
-                    '$remainingCount more',
-                    style: const TextStyle(
-                      color: Color(0xFF4DA3FF),
-                      fontSize: 13,
-                    ),
-                  ),
-                ),
-              ],
             ],
           ),
-        ),
-        if (_linksExpanded)
-          ...links
-              .skip(1)
-              .map(
-                (link) => Padding(
-                  padding: const EdgeInsets.only(top: 8),
-                  child: GestureDetector(
-                    onTap: () => _launchLink(link),
-                    child: Row(
-                      children: [
-                        const Icon(
-                          Icons.link,
-                          color: Color(0xFF4DA3FF),
-                          size: 16,
-                        ),
-                        const SizedBox(width: 6),
-                        Expanded(
-                          child: Text(
-                            link,
-                            style: const TextStyle(
-                              color: Color(0xFF4DA3FF),
-                              fontSize: 14,
-                            ),
-                            overflow: TextOverflow.ellipsis,
-                            maxLines: 1,
-                          ),
-                        ),
-                      ],
+        );
+
+      case _LookupState.notFound:
+        return Padding(
+          padding: const EdgeInsets.only(top: 6),
+          child: isWrytteId
+              ? _row('Wrytte number is not on Wrytte.')
+              : Row(
+                  children: [
+                    const Text(
+                      'Phone number is not on Wrytte. ',
+                      style: TextStyle(color: Colors.white54, fontSize: 13),
                     ),
+                    GestureDetector(
+                      onTap: () {
+                        // TODO: share invite link
+                      },
+                      child: const Text(
+                        'Invite',
+                        style: TextStyle(color: _kBlue, fontSize: 13),
+                      ),
+                    ),
+                  ],
+                ),
+        );
+
+      case _LookupState.idle:
+        return const SizedBox.shrink();
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Build
+  // ─────────────────────────────────────────────────────────────
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: _kBg,
+      appBar: AppBar(
+        backgroundColor: _kBg,
+        elevation: 0,
+        leading: TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text(
+            'Cancel',
+            style: TextStyle(color: Colors.white, fontSize: 16),
+          ),
+        ),
+        leadingWidth: 80,
+        centerTitle: true,
+        title: const Text(
+          'New contact',
+          style: TextStyle(
+            color: Colors.white,
+            fontSize: 18,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: _canSave && !_isSaving ? _save : null,
+            child: _isSaving
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: _kBlue,
+                    ),
+                  )
+                : Text(
+                    'Save',
+                    style: TextStyle(
+                      color: _canSave ? _kBlue : Colors.white38,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+          ),
+        ],
+      ),
+      body: SafeArea(
+        child: SingleChildScrollView(
+          physics: const BouncingScrollPhysics(),
+          padding: EdgeInsets.fromLTRB(
+            16,
+            16,
+            16,
+            MediaQuery.of(context).viewInsets.bottom + 20,
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // ── Name card ──────────────────────────────────────
+              _Card(
+                child: Column(
+                  children: [
+                    _NameField(
+                      controller: _firstNameCtrl,
+                      hint: 'First name',
+                      onChanged: (_) => setState(() {}),
+                    ),
+                    const Divider(height: 1, color: _kDivider),
+                    _NameField(
+                      controller: _lastNameCtrl,
+                      hint: 'Last name',
+                      onChanged: (_) => setState(() {}),
+                    ),
+                  ],
+                ),
+              ),
+
+              const SizedBox(height: 22),
+
+              // ── Label ─────────────────────────────────────────
+              const Padding(
+                padding: EdgeInsets.only(left: 4, bottom: 8),
+                child: Text(
+                  'Add phone number or Wrytte number here',
+                  style: TextStyle(color: Colors.white54, fontSize: 13),
+                ),
+              ),
+
+              // ── Country + Phone card ───────────────────────────
+              _Card(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // Country selector row
+                    ListTile(
+                      onTap: _pickCountry,
+                      dense: true,
+                      visualDensity: VisualDensity.compact,
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 6,
+                      ),
+                      title: Text(
+                        _selectedCountry == null
+                            ? 'Country'
+                            : _isWrytteIdMode
+                                ? 'Wrytte ID number'
+                                : '${_selectedCountry!.flag} ${_selectedCountry!.name}',
+                        style: TextStyle(
+                          color: _selectedCountry == null
+                              ? Colors.white38
+                              : Colors.white,
+                          fontSize: 15,
+                          fontWeight: _selectedCountry != null
+                              ? FontWeight.w500
+                              : FontWeight.normal,
+                        ),
+                      ),
+                      trailing: const Icon(
+                        Icons.chevron_right,
+                        color: Colors.white54,
+                        size: 20,
+                      ),
+                    ),
+
+                    const Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 16),
+                      child: Divider(color: _kDivider, height: 1),
+                    ),
+
+                    // Code + number row
+                    Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 10,
+                      ),
+                      child: Row(
+                        children: [
+                          // Dial-code field
+                          SizedBox(
+                            width: 68,
+                            child: TextField(
+                              controller: _codeCtrl,
+                              focusNode: _codeFocusNode,
+                              keyboardType: TextInputType.phone,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 15,
+                              ),
+                              decoration: const InputDecoration(
+                                border: InputBorder.none,
+                                isDense: true,
+                                contentPadding:
+                                    EdgeInsets.symmetric(vertical: 8),
+                              ),
+                              onChanged: _isWrytteIdMode
+                                  ? null
+                                  : _detectCountryFromCode,
+                              onTap: _onCodeFieldTap,
+                              readOnly: _isWrytteIdMode,
+                            ),
+                          ),
+
+                          // Blue vertical divider
+                          if (_showDivider)
+                            Container(
+                              height: 22,
+                              width: 1,
+                              color: _kBlue,
+                              margin:
+                                  const EdgeInsets.symmetric(horizontal: 8),
+                            ),
+
+                          // Number / ID field
+                          Expanded(
+                            child: TextField(
+                              controller: _numberCtrl,
+                              focusNode: _numberFocusNode,
+                              keyboardType: TextInputType.number,
+                              inputFormatters: [
+                                FilteringTextInputFormatter.digitsOnly,
+                              ],
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 15,
+                              ),
+                              decoration: InputDecoration(
+                                hintText: _showDivider
+                                    ? (_isWrytteIdMode
+                                        ? 'Wrytte ID'
+                                        : 'Phone number')
+                                    : '',
+                                hintStyle: const TextStyle(
+                                  color: Colors.white38,
+                                  fontSize: 15,
+                                ),
+                                border: InputBorder.none,
+                                isDense: true,
+                                contentPadding:
+                                    const EdgeInsets.symmetric(vertical: 8),
+                              ),
+                              enabled: _showDivider,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+              // ── Status line ────────────────────────────────────
+              _buildStatusLine(),
+
+              const SizedBox(height: 22),
+
+              // ── Sync to phone card ─────────────────────────────
+              _Card(
+                child: SwitchListTile(
+                  dense: true,
+                  visualDensity: VisualDensity.compact,
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 4,
+                  ),
+                  title: const Text(
+                    'Sync contact to phone',
+                    style: TextStyle(color: Colors.white, fontSize: 15),
+                  ),
+                  value: _syncToPhone,
+                  activeColor: _kBlue,
+                  onChanged: (v) => setState(() => _syncToPhone = v),
+                ),
+              ),
+
+              const SizedBox(height: 28),
+
+              // ── Add via QR code ────────────────────────────────
+              Center(
+                child: GestureDetector(
+                  onTap: () {
+                    // TODO: open QR scanner
+                  },
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.qr_code_2_rounded, color: _kBlue, size: 28),
+                      SizedBox(width: 8),
+                      Text(
+                        'Add via QR code',
+                        style: TextStyle(
+                          color: _kBlue,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ),
-      ],
-    );
-  }
-
-  // ── Glass helpers ──────────────────────────────────────────────────────────
-
-  Widget _glassButton({required IconData icon, required VoidCallback onTap}) {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(22),
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
-        child: Container(
-          width: 44,
-          height: 44,
-          decoration: BoxDecoration(
-            color: const Color(0xFF23262C).withOpacity(0.30),
-            borderRadius: BorderRadius.circular(22),
-            border: Border.all(color: const Color(0xFF23262C)),
-          ),
-          child: IconButton(
-            icon: Icon(icon, color: Colors.white, size: 16),
-            onPressed: onTap,
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _glassTextButton({required String text, required VoidCallback onTap}) {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(22),
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
-        child: Container(
-          height: 44,
-          padding: const EdgeInsets.symmetric(horizontal: 14),
-          decoration: BoxDecoration(
-            color: const Color(0xFF23262C).withOpacity(0.30),
-            borderRadius: BorderRadius.circular(22),
-            border: Border.all(color: const Color(0xFF23262C)),
-          ),
-          child: GestureDetector(
-            onTap: onTap,
-            child: Center(
-              child: Text(
-                text,
-                // CHANGE 1: Always white, for both own and other user
-                style: const TextStyle(color: Colors.white, fontSize: 16),
-              ),
-            ),
+            ],
           ),
         ),
       ),
@@ -682,35 +696,56 @@ class _ProfileScreenState extends State<ProfileScreen>
   }
 }
 
-// ── Sticky tab bar delegate ────────────────────────────────────────────────────
-// CHANGE 5: topOffset is accepted but the delegate pins at its natural sliver
-// position (just after the header slivers), which means the tab bar sticks
-// right below where the header ends — and stays there on scroll.
-
-class _StickyTabBarDelegate extends SliverPersistentHeaderDelegate {
+// ─────────────────────────────────────────────────────────────────
+// Reusable card wrapper
+// ─────────────────────────────────────────────────────────────────
+class _Card extends StatelessWidget {
   final Widget child;
-  // topOffset kept for reference / future use but pinning is handled by
-  // SliverPersistentHeader(pinned: true) in the NestedScrollView header.
-  final double topOffset;
-
-  const _StickyTabBarDelegate({required this.child, this.topOffset = 0});
-
-  static const double _height = 56.0;
+  const _Card({required this.child});
 
   @override
-  double get minExtent => _height;
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: _kCard,
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: child,
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Reusable name text field
+// ─────────────────────────────────────────────────────────────────
+class _NameField extends StatelessWidget {
+  final TextEditingController controller;
+  final String hint;
+  final ValueChanged<String>? onChanged;
+
+  const _NameField({
+    required this.controller,
+    required this.hint,
+    this.onChanged,
+  });
 
   @override
-  double get maxExtent => _height;
-
-  @override
-  Widget build(
-    BuildContext context,
-    double shrinkOffset,
-    bool overlapsContent,
-  ) => child;
-
-  @override
-  bool shouldRebuild(_StickyTabBarDelegate old) =>
-      old.child != child || old.topOffset != topOffset;
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      child: TextField(
+        controller: controller,
+        onChanged: onChanged,
+        style: const TextStyle(color: Colors.white, fontSize: 15),
+        cursorColor: _kBlue,
+        decoration: InputDecoration(
+          hintText: hint,
+          hintStyle: const TextStyle(color: Colors.white38, fontSize: 15),
+          border: InputBorder.none,
+          isDense: true,
+          contentPadding: const EdgeInsets.symmetric(vertical: 12),
+        ),
+      ),
+    );
+  }
 }

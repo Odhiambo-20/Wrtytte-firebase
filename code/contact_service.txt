@@ -55,9 +55,30 @@ class ContactService {
   // ──────────────────────────────────────────────────────────────────────
   // Permission
   // ──────────────────────────────────────────────────────────────────────
+  // ✅ FIXED — check status first, only request if not yet determined
+  // Add as a class-level field
+
+static bool _permissionRequestInProgress = false;
+
   Future<bool> requestContactsPermission() async {
-    final status = await Permission.contacts.request();
-    return status.isGranted;
+    final status = await Permission.contacts.status;
+    if (status.isGranted) return true;
+    if (status.isPermanentlyDenied) return false;
+
+    // Guard against concurrent requests
+    if (_permissionRequestInProgress) {
+      // Wait briefly and re-check
+      await Future.delayed(const Duration(milliseconds: 500));
+      return (await Permission.contacts.status).isGranted;
+    }
+
+    _permissionRequestInProgress = true;
+    try {
+      final result = await Permission.contacts.request();
+      return result.isGranted;
+    } finally {
+      _permissionRequestInProgress = false;
+    }
   }
 
   // ──────────────────────────────────────────────────────────────────────
@@ -122,7 +143,7 @@ class ContactService {
 
       final docId = phone.replaceAll(RegExp(r'[^\d]'), '');
 
-      //  FIXED: write to private subcollection under the owner's UID
+      // ✅ FIXED: write to private subcollection under the owner's UID
       final contactRef = _firestore
           .collection('users')
           .doc(ownerUserId)
@@ -141,10 +162,10 @@ class ContactService {
         'createdAt': FieldValue.serverTimestamp(),
       }, SetOptions(merge: true));
 
-      debugPrint(' Contact saved to users/$ownerUserId/contacts/$docId: ${contact.displayName}');
+      debugPrint('✅ Contact saved to users/$ownerUserId/contacts/$docId: ${contact.displayName}');
     } catch (e, stack) {
-      debugPrint(' Firestore write FAILED: $e');
-      debugPrint(' Stack: $stack');
+      debugPrint('🔴 Firestore write FAILED: $e');
+      debugPrint('🔴 Stack: $stack');
       rethrow;
     }
   }
@@ -155,12 +176,12 @@ class ContactService {
   Future<List<Contact>> getFirestoreContacts(String ownerUserId) async {
     final currentUid = FirebaseAuth.instance.currentUser?.uid;
     if (currentUid == null) {
-      debugPrint(' Not authenticated');
+      debugPrint('🔴 Not authenticated');
       return [];
     }
 
     try {
-      //  FIXED: read only from this user's private subcollection
+      // ✅ FIXED: read only from this user's private subcollection
       final snapshot = await _firestore
           .collection('users')
           .doc(ownerUserId)
@@ -206,7 +227,7 @@ class ContactService {
     final token = await FirebaseAuth.instance.currentUser?.getIdToken();
     if (token == null || token.isEmpty) throw Exception('User not authenticated');
 
-    //  Use cache if less than 5 minutes old
+    // ✅ Use cache if less than 5 minutes old
     final now = DateTime.now();
     final cacheValid = _cacheTime != null &&
         now.difference(_cacheTime!).inMinutes < 5 &&
@@ -215,10 +236,10 @@ class ContactService {
     Map<String, String> phoneUserMap;
 
     if (cacheValid) {
-      debugPrint(' Using cached phone lookup');
+      debugPrint('✅ Using cached phone lookup');
       phoneUserMap = _phoneUserMapCache!;
     } else {
-      //  Run ALL chunks in parallel
+      // ✅ Run ALL chunks in parallel
       const chunkSize = 10;
       final chunks = <List<String>>[];
       for (var i = 0; i < allPhones.length; i += chunkSize) {
@@ -239,7 +260,7 @@ class ContactService {
         phoneUserMap.addAll(result);
       }
 
-      //  Store in cache
+      // ✅ Store in cache
       _phoneUserMapCache = phoneUserMap;
       _cacheTime = now;
     }
@@ -278,33 +299,34 @@ class ContactService {
 
   // ──────────────────────────────────────────────────────────────────────
   // Save a manually-entered contact
-  //  NEVER writes to device phonebook — stays inside Wrytte only
+  // ✅ NEVER writes to device phonebook — stays inside Wrytte only
   // ──────────────────────────────────────────────────────────────────────
-  Future<Contact> saveManualContact({
-    required String firstName,
-    required String lastName,
-    required String fullIdentifier,
-    required String? wrytteUserId,
-    required bool syncToPhone,
-    required String token,
-    required String? selfUserId,
-  }) async {
-    final displayName = '$firstName $lastName'.trim();
-    final isWrytteContact = wrytteUserId != null && wrytteUserId.isNotEmpty;
+Future<Contact> saveManualContact({
+  required String firstName,
+  required String lastName,
+  required String fullIdentifier,
+  required String? wrytteUserId,
+  required bool syncToPhone,
+  required String token,
+  required String? selfUserId,
+}) async {
+  final displayName = '$firstName $lastName'.trim();
+  final isWrytteContact = wrytteUserId != null && wrytteUserId.isNotEmpty;
 
-    if (isWrytteContact) {
-      if (selfUserId == null || selfUserId.isEmpty) {
-        throw Exception('Could not resolve your user ID. Please log in again.');
-      }
-      await _openImAddFriend(
-        selfUserId: selfUserId,
-        friendUserId: wrytteUserId!,
-        remark: displayName,
-        token: token,
-      );
+  if (isWrytteContact) {
+    if (selfUserId == null || selfUserId.isEmpty) {
+      throw Exception('Could not resolve your user ID. Please log in again.');
     }
+    await _openImAddFriend(
+      selfUserId: selfUserId,
+      friendUserId: wrytteUserId,
+      remark: displayName,
+      token: token,
+    );
+  }
 
-    final contact = Contact(
+
+  final contact = Contact(
       displayName: displayName,
       phones: [fullIdentifier],
       isOnWrytte: isWrytteContact,
