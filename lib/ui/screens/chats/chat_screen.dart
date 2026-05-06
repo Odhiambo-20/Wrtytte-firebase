@@ -251,10 +251,12 @@ class _ChatScreenState extends State<ChatScreen> {
 
       if (mounted) {
         setState(() {
-          _messages.removeWhere((m) => m.id == optimistic.id);
+          final idx = _messages.indexWhere((m) => m.id == optimistic.id);
+          if (idx != -1) {
+            _messages[idx] = optimistic.copyWith(status: MessageStatus.sent); // ✅ keep it visible
+          }
         });
-      }
-    } catch (e) {
+      }}catch (e) {
       debugPrint('[ChatScreen] send error: $e');
       if (mounted) {
         setState(() {
