@@ -172,6 +172,7 @@ class ChatService {
       _messageController.add(sent);
     } catch (e) {
       //debugPrint('[ChatService] sendMessage error: $e');
+      debugPrint('SEND ERROR FULL: $e');
       debugPrint('[ChatService] sendMessage error FULL:');
       debugPrint(e.toString());
       _errorController.add('Failed to send: $e');
@@ -195,13 +196,21 @@ class ChatService {
         nickname: receiverID,
       );
 
+      debugPrint('STEP 1 createTextMessage');
+
       final openImMsg = await OpenIM.iMManager.messageManager
           .createSoundMessageFromFullPath(
             soundPath: filePath,
             duration: durationSeconds,
           );
+      debugPrint('STEP 2 message created: ${openImMsg.clientMsgID}');
 
-      await OpenIM.iMManager.messageManager.sendMessage(
+      debugPrint('STEP 3 sending...');
+      debugPrint('LOGGED USER: ${OpenIM.iMManager.userID}');
+      debugPrint('TARGET USER: $openImReceiverId');
+
+      //await OpenIM.iMManager.messageManager.sendMessage(
+      final result = await OpenIM.iMManager.messageManager.sendMessage(
         message: openImMsg,
         userID: openImReceiverId,
         offlinePushInfo: OfflinePushInfo(
@@ -210,6 +219,7 @@ class ChatService {
           iOSBadgeCount: true,
         ),
       );
+      debugPrint('STEP 4 send result: $result');
 
       final convId = _deriveConvId(_currentUserId ?? '', openImReceiverId);
 

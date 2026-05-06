@@ -406,7 +406,7 @@ class _ChatScreenState extends State<ChatScreen> {
               'convId: $_resolvedConversationId\n'
               'error: $_sendError',   // ✅ joined to the string above with \n
               style: const TextStyle(color: Colors.white, fontSize: 11),
-            ),
+            )
 
              ),
               MessageInputField(
