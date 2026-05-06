@@ -27,3 +27,16 @@ macos/Flutter/GeneratedPluginRegistrant.swift
 
 # Platform symlinks
 **/ephemeral/.plugin_symlinks/
+
+# Android Gradle build artifacts
+android/gradle/8.9/executionHistory.bin
+android/gradle/8.9/executionHistory.lock
+android/gradle/8.9/fileHashes.bin
+android/gradle/8.9/fileHashes.lock
+android/gradle/8.9/resourceHashesCache.bin
+android/gradle/buildOutputCleanup.lock
+android/local.properties
+android/file-system.probe
+
+# Flutter build outputs
+build/
