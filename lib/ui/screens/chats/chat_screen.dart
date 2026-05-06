@@ -47,6 +47,7 @@ class _ChatScreenState extends State<ChatScreen> {
   StreamSubscription<ChatMessage>? _msgSub;
 
   final List<ChatMessage> _messages = [];
+  final Map<String, String> _optimisticIdByContent = {};
 
   String? _resolvedConversationId;
 
@@ -84,7 +85,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   String _normaliseId(String id) {
-    return id.startsWith('+') ? id.substring(1) : id;
+    return id.replaceAll(RegExp(r'[^\d]'), '');
   }
 
   String _buildSortedConvId(String normalisedReceiverId) {
@@ -100,6 +101,11 @@ class _ChatScreenState extends State<ChatScreen> {
     if (_resolvedConversationId != null) return _resolvedConversationId!;
 
     final normalisedReceiverId = _normaliseId(widget.receiverId);
+
+    if (widget.conversationId.startsWith('si_')) {
+      _resolvedConversationId = widget.conversationId;
+      return _resolvedConversationId!;
+    }
 
     try {
       final ConversationInfo conv = await OpenIM
@@ -136,18 +142,15 @@ class _ChatScreenState extends State<ChatScreen> {
 
     if (!mounted) return;
     setState(() {
-      _messages
-        ..clear()
-        ..addAll(msgs);
+      _mergeMessages(msgs);
     });
     WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
 
     _msgSub = _chat.messageStream.listen((msg) {
       if (msg.conversationId != realConvId) return;
       if (!mounted) return;
-      if (_messages.any((m) => m.id == msg.id)) return;
 
-      setState(() => _messages.add(msg));
+      setState(() => _upsertMessage(msg));
       WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
     });
   }
@@ -224,6 +227,10 @@ class _ChatScreenState extends State<ChatScreen> {
 
 
   Future<void> _send() async {
+    debugPrint('SEND CLICKED');
+    debugPrint('_isSending=$_isSending');
+    debugPrint('text=${_controller.text}');
+
     final text = _controller.text.trim();
     if (text.isEmpty || _isSending) return;
 
@@ -244,17 +251,15 @@ class _ChatScreenState extends State<ChatScreen> {
     );
 
     setState(() => _messages.add(optimistic));
+    _optimisticIdByContent['${normalisedReceiverId}_$text'] = optimistic.id;
     WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
 
     try {
-      await _chat.sendMessage(optimistic);
+      final sent = await _chat.sendMessage(optimistic);
 
       if (mounted) {
         setState(() {
-          final idx = _messages.indexWhere((m) => m.id == optimistic.id);
-          if (idx != -1) {
-            _messages[idx] = optimistic.copyWith(status: MessageStatus.sent); // ✅ keep it visible
-          }
+          _replaceOptimisticMessage(optimistic.id, sent);
         });
       }}catch (e) {
       debugPrint('[ChatScreen] send error: $e');
@@ -380,6 +385,57 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  void _mergeMessages(List<ChatMessage> incoming) {
+    for (final msg in incoming) {
+      _upsertMessage(msg);
+    }
+    _messages.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+  }
+
+  void _upsertMessage(ChatMessage msg) {
+    final exactIdx = _messages.indexWhere((m) => m.id == msg.id);
+    if (exactIdx != -1) {
+      _messages[exactIdx] = msg;
+      return;
+    }
+
+    final optimisticId = _matchingOptimisticId(msg);
+    if (optimisticId != null) {
+      _replaceOptimisticMessage(optimisticId, msg);
+      return;
+    }
+
+    _messages.add(msg);
+  }
+
+  String? _matchingOptimisticId(ChatMessage msg) {
+    for (final entry in _optimisticIdByContent.entries) {
+      final optimistic = _messages.firstWhere(
+        (m) => m.id == entry.value,
+        orElse: () => msg,
+      );
+      if (optimistic.id != entry.value) continue;
+      final sameContent = optimistic.content == msg.content;
+      final sameReceiver = optimistic.receiverId == msg.receiverId ||
+          optimistic.receiverId == msg.senderId;
+      final closeInTime =
+          msg.timestamp.difference(optimistic.timestamp).inSeconds.abs() < 30;
+      if (sameContent && sameReceiver && closeInTime) return optimistic.id;
+    }
+    return null;
+  }
+
+  void _replaceOptimisticMessage(String optimisticId, ChatMessage sent) {
+    final idx = _messages.indexWhere((m) => m.id == optimisticId);
+    if (idx != -1) {
+      _messages[idx] = sent;
+    } else {
+      _upsertMessage(sent);
+    }
+    _optimisticIdByContent.removeWhere((_, id) => id == optimisticId);
+    _messages.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+  }
+
 
   // BUILD
 
@@ -399,18 +455,6 @@ class _ChatScreenState extends State<ChatScreen> {
             children: [
               SizedBox(height: appBarH),
               Expanded(child: _buildMessageList()),
-              Container(
-              color: Colors.red.withOpacity(0.8),
-              padding: const EdgeInsets.all(6),
-              child: Text(
-              'receiver: ${widget.receiverId}\n'
-              'currentUser: ${widget.currentUserId}\n'
-              'convId: $_resolvedConversationId\n'
-              'error: $_sendError',   // ✅ joined to the string above with \n
-              style: const TextStyle(color: Colors.white, fontSize: 11),
-            )
-
-             ),
               MessageInputField(
                 controller: _controller,
                 focusNode: _focusNode,

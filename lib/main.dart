@@ -49,7 +49,9 @@ Future<void> main() async {
   );
 
   // ── Initialise OpenIM SDK ──────────────────────────────────────────────────
-  _initOpenIM(); // fire-and-forget — does not block runApp()
+  // fire-and-forget — does not block runApp()
+   _initOpenIM();
+  
   // ──────────────────────────────────────────────────────────────────────────
 
   await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
@@ -285,13 +287,8 @@ class _AuthWrapperState extends State<AuthWrapper> {
     String nickname = '',
     String faceUrl  = '',
   }) async {
-    try {
-      await _chatService.connect();
-    } catch (e) {
-      debugPrint('[AuthWrapper] ChatService connection error: $e');
-    }
-
-    // Re-connect OpenIM SDK using the saved imToken
+    // Re-connect OpenIM SDK using the saved imToken before ChatService starts
+    // listening/fetching, otherwise conversations can initialize while logged out.
     try {
       final imToken = await AuthService.instance.getOpenImToken();
       await AuthService.instance.loginToOpenIM(
@@ -302,6 +299,12 @@ class _AuthWrapperState extends State<AuthWrapper> {
       );
     } catch (e) {
       debugPrint('[AuthWrapper] OpenIM login error: $e');
+    }
+
+    try {
+      await _chatService.connect();
+    } catch (e) {
+      debugPrint('[AuthWrapper] ChatService connection error: $e');
     }
 
     if (mounted) {

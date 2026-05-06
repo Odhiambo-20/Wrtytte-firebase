@@ -389,6 +389,11 @@ class AuthService {
       _storage.read(key: _openImTokenKey);
   Future<String?> getChatToken() async => _storage.read(key: _chatTokenKey);
 
+  Future<void> updateStoredUsername(String username) async {
+    if (username.trim().isEmpty) return;
+    await _storage.write(key: _usernameKey, value: username.trim());
+  }
+
   Future<bool> isLoggedIn() async {
     final user = await getCurrentUser();
     if (user == null) return false;

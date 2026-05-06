@@ -96,6 +96,7 @@ class ChatState {
     }
   }
 
+ 
   Future<void> sendMessage(ChatMessage message) async {
     if (message.conversationId == _activeConversationId) {
       if (!_messages.any((m) => m.id == message.id)) {
@@ -106,6 +107,13 @@ class ChatState {
     }
 
     try {
+      // ── Guard: ensure OpenIM is actually logged in ──────────────────────
+      final status = await OpenIM.iMManager.getLoginStatus();
+      if (status != LoginStatus.logged) {
+        throw Exception('OpenIM not logged in (status=$status)');
+      }
+      // ───────────────────────────────────────────────────────────────────
+
       final openImMsg = await OpenIM.iMManager.messageManager
           .createTextMessage(text: message.content);
 
@@ -135,6 +143,17 @@ class ChatState {
       _handleError('Failed to send message: $e');
     }
   }
+
+
+
+
+
+
+
+
+
+
+
 
   void clearMessages() {
     _messages.clear();

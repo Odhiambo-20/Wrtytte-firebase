@@ -283,7 +283,12 @@ class _NewContactPageState extends State<NewContactPage> {
       if (!mounted) return;
 
       final receiverId = saved.wrytteUserId ?? '';
-      final conversationId = ([selfId, receiverId]..sort()).join('_');
+      final normalizedReceiverId = (receiverId.isNotEmpty
+              ? receiverId
+              : _fullIdentifier)
+          .replaceAll(RegExp(r'[^\d]'), '');
+      final ids = [selfId, normalizedReceiverId]..sort();
+      final conversationId = 'si_${ids[0]}_${ids[1]}';
 
       // Always navigate to chat — whether on Wrytte or not
       Navigator.pushReplacement(
@@ -291,7 +296,7 @@ class _NewContactPageState extends State<NewContactPage> {
         MaterialPageRoute(
           builder: (_) => ChatScreen(
             conversationId: conversationId,
-            receiverId: receiverId.isNotEmpty ? receiverId : _fullIdentifier,
+            receiverId: receiverId.isNotEmpty ? receiverId : normalizedReceiverId,
             currentUserId: selfId,
             title: saved.formattedName,
             avatarUrl: saved.avatarUrl,

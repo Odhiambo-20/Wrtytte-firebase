@@ -36,6 +36,7 @@ class ChatService {
   String? _currentUserId;
   bool    _initialized = false;
   bool    _isConnected = false;
+  Future<void>? _connectFuture;
 
   String? get currentUserId => _currentUserId;
 
@@ -44,7 +45,17 @@ class ChatService {
 
   Future<void> connect() async {
     if (_initialized) return;
+    if (_connectFuture != null) return _connectFuture!;
 
+    _connectFuture = _connect();
+    try {
+      await _connectFuture;
+    } finally {
+      _connectFuture = null;
+    }
+  }
+
+  Future<void> _connect() async {
     try {
       final user = await _authService.getCurrentUser();
       _currentUserId = user?.userId ?? OpenIM.iMManager.userID;
@@ -53,6 +64,11 @@ class ChatService {
         _errorController.add('User not authenticated');
         return;
       }
+
+      await _ensureOpenImLoggedIn(
+        userId: _currentUserId!,
+        nickname: user?.username ?? _currentUserId!,
+      );
 
       OpenIM.iMManager.messageManager.setAdvancedMsgListener(
         OnAdvancedMsgListener(
@@ -129,8 +145,19 @@ class ChatService {
     }
   }
 
-  Future<void> sendMessage(ChatMessage message) async {
-    if (!_isConnected) throw Exception('ChatService not connected');
+  Future<ChatMessage> sendMessage(ChatMessage message) async {
+ 
+    // If not connected, wait up to 10s for connection to complete
+    if (!_isConnected) {
+      debugPrint('[ChatService] Not connected — waiting for connection...');
+      try {
+        await connectionStream
+            .firstWhere((connected) => connected == true)
+            .timeout(const Duration(seconds: 10));
+      } catch (_) {
+        throw Exception('ChatService not connected — timed out waiting');
+      }
+    }
 
     try {
       // Strip non-numeric characters so recvID is valid for OpenIM.
@@ -170,6 +197,7 @@ class ChatService {
 
       _cacheMessage(sent);
       _messageController.add(sent);
+      return sent;
     } catch (e) {
       //debugPrint('[ChatService] sendMessage error: $e');
       debugPrint('SEND ERROR FULL: $e');
@@ -177,6 +205,42 @@ class ChatService {
       debugPrint(e.toString());
       _errorController.add('Failed to send: $e');
       rethrow;
+    }
+  }
+
+  Future<void> _ensureOpenImLoggedIn({
+    required String userId,
+    required String nickname,
+  }) async {
+    try {
+      final status = await OpenIM.iMManager
+          .getLoginStatus()
+          .timeout(const Duration(seconds: 3));
+
+      if (status == LoginStatus.logged && OpenIM.iMManager.userID == userId) {
+        return;
+      }
+    } catch (e) {
+      debugPrint('[ChatService] getLoginStatus before connect failed: $e');
+    }
+
+    final token = await _authService.getOpenImToken();
+    if (token == null || token.isEmpty) {
+      debugPrint('[ChatService] No OpenIM token available for $userId');
+      return;
+    }
+
+    await _authService.loginToOpenIM(
+      userId: userId,
+      nickname: nickname,
+      imToken: token,
+    );
+
+    final status = await OpenIM.iMManager
+        .getLoginStatus()
+        .timeout(const Duration(seconds: 5));
+    if (status != LoginStatus.logged || OpenIM.iMManager.userID != userId) {
+      throw Exception('OpenIM login did not complete (status=$status)');
     }
   }
 
@@ -344,25 +408,23 @@ class ChatService {
   */
 
 
-  //After
   Future<void> disconnect() async {
-  if (!_isConnected) return;
-  await reset();
+    if (!_isConnected) return;
+    await reset();
   }
 
-/// Clears all in-memory state so a new user can connect cleanly.
-/// Called on logout before OpenIM logout wipes the local SQLite DB.
+  /// Clears all in-memory state so a new user can connect cleanly.
+  /// Called on logout before OpenIM logout wipes the local SQLite DB.
   Future<void> reset() async {
     _isConnected = false;
     _initialized = false;
+    _connectFuture = null;
     _currentUserId = null;
     _conversationsMap.clear();
     _messagesCache.clear();
     _connectionController.add(false);
-    debugPrint('[ChatService] Reset — ready for new user');
+    debugPrint('[ChatService] Reset - ready for new user');
   }
-
-
 
   void dispose() {
     disconnect();
@@ -499,7 +561,7 @@ class ChatService {
   */
 
   String _toOpenImUserId(String id) {
-  return id.trim();
+  return id.replaceAll(RegExp(r'[^\d]'), '');
   }
 
   MessageStatus _mapStatus(int? status) {

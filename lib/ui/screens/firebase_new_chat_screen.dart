@@ -152,7 +152,8 @@ class _FirebaseNewChatScreenState extends State<FirebaseNewChatScreen> {
     if (receiverId.isEmpty) return;
 
     // Derive the OpenIM conversationID: si_{smaller}_{larger} (sorted)
-    final ids = [currentUserId, receiverId]..sort();
+    final normalizedReceiverId = receiverId.replaceAll(RegExp(r'[^\d]'), '');
+    final ids = [currentUserId, normalizedReceiverId]..sort();
     final conversationId = 'si_${ids[0]}_${ids[1]}';
 
     if (!mounted) return;
@@ -162,7 +163,7 @@ class _FirebaseNewChatScreenState extends State<FirebaseNewChatScreen> {
       MaterialPageRoute(
         builder: (_) => ChatScreen(
           conversationId: conversationId,
-          receiverId: receiverId,
+          receiverId: normalizedReceiverId,
           currentUserId: currentUserId,
           title: _sanitize(contact.formattedName),
           avatarUrl: contact.avatarUrl,

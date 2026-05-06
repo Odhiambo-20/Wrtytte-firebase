@@ -114,27 +114,31 @@ class _AddProfilePageState extends State<AddProfilePage> {
 
     if (mounted) setState(() => _isSaving = true);
 
-    try {
-      await AuthService.instance.ensureFirebaseAuth();
-
-      final List<String?> errors = await Future.wait<String?>(
-        [
-          _updateFirestore(uid, name),
-          _updateOpenImNicknameWithRetry(name),
-        ],
-        eagerError: false,
-      );
-
-      for (final error in errors) {
-        if (error != null) debugPrint('[AddProfilePage] Save warning: $error');
-      }
-    } catch (e) {
-      debugPrint('[AddProfilePage] _saveAndGoHome unexpected error: $e');
-    } finally {
-      if (mounted) setState(() => _isSaving = false);
-    }
-
+    await AuthService.instance.updateStoredUsername(name);
+    _syncProfileInBackground(uid, name);
     await _navigateHome(uid);
+  }
+
+  void _syncProfileInBackground(String uid, String name) {
+    unawaited(() async {
+      try {
+        await AuthService.instance.ensureFirebaseAuth();
+
+        final List<String?> errors = await Future.wait<String?>(
+          [
+            _updateFirestore(uid, name),
+            _updateOpenImNicknameWithRetry(name),
+          ],
+          eagerError: false,
+        );
+
+        for (final error in errors) {
+          if (error != null) debugPrint('[AddProfilePage] Save warning: $error');
+        }
+      } catch (e) {
+        debugPrint('[AddProfilePage] background profile sync error: $e');
+      }
+    }());
   }
 
   Future<String?> _updateFirestore(String uid, String name) async {

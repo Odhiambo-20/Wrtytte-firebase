@@ -1,8 +1,9 @@
+import 'dart:async';
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:wrytte/components/user_avatar.dart';
 import 'package:wrytte/models/chat_models/chat_message.dart';
-import 'package:wrytte/services/chat/firebase_chat_service.dart';
+import 'package:wrytte/services/chat/chat_service.dart';
 import 'package:wrytte/ui/screens/chats/widgets/message_bubble.dart';
 import 'package:wrytte/ui/screens/chats/chat_screen.dart';
 
@@ -27,8 +28,9 @@ class MiniChatPreview extends StatefulWidget {
 }
 
 class _MiniChatPreviewState extends State<MiniChatPreview> {
-  final FirebaseChatService _chat = FirebaseChatService();
+  final ChatService _chat = ChatService();
   final ScrollController _scrollController = ScrollController();
+  StreamSubscription<ChatMessage>? _messageSub;
 
   List<ChatMessage> _messages = [];
 
@@ -48,14 +50,35 @@ class _MiniChatPreviewState extends State<MiniChatPreview> {
 
   void _listen() async {
     await _chat.connect();
-    _chat.getMessagesStream(widget.conversationId).listen((messages) {
-      if (!mounted) return;
+    final messages = await _chat.fetchMessageHistory(
+      conversationID: widget.conversationId,
+      count: 30,
+    );
+    if (mounted) {
       setState(() => _messages = messages);
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_scrollController.hasClients) {
-          _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
-        }
-      });
+      _scrollToBottom();
+    }
+    _messageSub = _chat.messageStream.listen((message) {
+      if (!mounted) return;
+      if (message.conversationId != widget.conversationId) return;
+      if (_messages.any((m) => m.id == message.id)) return;
+      setState(() => _messages.add(message));
+      _scrollToBottom();
+    });
+  }
+
+  @override
+  void dispose() {
+    _messageSub?.cancel();
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+      }
     });
   }
 

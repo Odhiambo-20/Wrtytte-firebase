@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:wrytte/services/auth/real_number_service.dart';
@@ -103,7 +104,10 @@ class _OtpVerificationPageState extends State<OtpVerificationPage>
       // A phone that already has an account always skips AddProfilePage,
       // even if somehow routed through the signup UI.
 
-      if (result.isNewUser) {
+      final hasUsableProfileName =
+          !result.isNewUser && await _hasUsableProfileName(result.userId);
+
+      if (result.isNewUser || !hasUsableProfileName) {
         // First-time signup — user must set their display name.
         Navigator.pushAndRemoveUntil(
           context,
@@ -154,6 +158,26 @@ class _OtpVerificationPageState extends State<OtpVerificationPage>
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
+  }
+
+  Future<bool> _hasUsableProfileName(String userId) async {
+    try {
+      final doc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(userId)
+          .get()
+          .timeout(const Duration(seconds: 3));
+      final name = doc.data()?['name']?.toString().trim() ?? '';
+      return name.length >= 2 && !_looksLikePhone(name);
+    } catch (e) {
+      debugPrint('[OtpVerificationPage] profile check failed: $e');
+      return false;
+    }
+  }
+
+  bool _looksLikePhone(String value) {
+    final s = value.replaceAll(RegExp(r'[\s\-()]'), '');
+    return s.startsWith('+') || RegExp(r'^\d{6,}$').hasMatch(s);
   }
 
   Widget _buildOtpBoxes() {

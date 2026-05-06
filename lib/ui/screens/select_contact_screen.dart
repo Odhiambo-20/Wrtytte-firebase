@@ -117,8 +117,11 @@ class _SelectContactScreenState extends State<SelectContactScreen> {
   }
 
   String _generateConversationId(String id1, String id2) {
-    final ids = [id1, id2]..sort();
-    return '${ids[0]}-${ids[1]}';
+    final ids = [
+      id1.replaceAll(RegExp(r'[^\d]'), ''),
+      id2.replaceAll(RegExp(r'[^\d]'), ''),
+    ]..sort();
+    return 'si_${ids[0]}_${ids[1]}';
   }
 
   void _navigateToChatScreen(Contact contact) async {

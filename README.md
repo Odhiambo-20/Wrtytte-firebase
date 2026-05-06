@@ -23,6 +23,38 @@ The Wrytte app uses **OpenIM** for real-time chat and messaging. The server runs
 
 ---
 
+## OpenIM vs Firebase Roles
+
+Wrytte currently uses both OpenIM and Firebase, but they are responsible for different parts of the app.
+
+### OpenIM Handles
+
+| Area | Details |
+|---|---|
+| Chat messages | One-to-one message send/receive, message IDs, sequence numbers, read state, and message history |
+| Conversations | Conversation list, latest message metadata, unread counts, and OpenIM conversation IDs like `si_254712140013_5380285960` |
+| Realtime messaging | WebSocket connection on `ws://34.63.32.143:10001` |
+| Message persistence | MongoDB database `openim_v3`, mainly collection `msg` |
+| Chat auth/session | OpenIM `imToken` and chat server `chatToken` |
+| User registration/login backend | Phone registration/login through the OpenIM chat server |
+| Voice messages | OpenIM sound messages and OpenIM/MinIO file handling |
+
+### Firebase Handles
+
+| Area | Details |
+|---|---|
+| User profile metadata | Firestore `users` documents: display name, username, phone, profile image fields, and profile lookup fallback |
+| Saved contacts | Contacts saved by a user and contact-name enrichment for chat/conversation UI |
+| Anonymous Firebase auth | Used so the app can read/write permitted Firestore profile/contact documents |
+| Profile edits | Name/profile metadata updates after signup and edit profile flows |
+| Non-chat app data | Any app features that already use Firestore outside OpenIM messaging |
+
+### Important Boundary
+
+Firebase does **not** store Wrytte chat messages in the active app flow. If Firestore has no `chats` collection, that is expected. Chat messages should be inspected in OpenIM MongoDB, not Firebase.
+
+---
+
 ## Server Details
 
 | Property | Value |
@@ -264,6 +296,172 @@ docker logs openim-chat 2>&1 | grep -E "ERROR|panic|fatal" | grep -v "rpc"
 
 ---
 
+## 7.1. Accessing Stored Chat Messages on the Server
+
+Wrytte chat messages are stored by **OpenIM**, not Firebase Firestore. On the server, OpenIM stores message data in MongoDB:
+
+| Item | Value |
+|---|---|
+| Mongo container | `mongo` |
+| Mongo root user | `root` |
+| Mongo root password | `openIM123` |
+| OpenIM database | `openim_v3` |
+| Message collection | `msg` |
+| Conversation metadata collection | `conversation` |
+
+### SSH and Open the OpenIM Compose Directory
+
+```bash
+ssh odhiambov110@34.63.32.143
+cd /home/odhiambov110/openim-docker
+```
+
+### Confirm Containers and Logs
+
+```bash
+docker ps
+docker logs openim-server --tail 200
+docker logs openim-chat --tail 200
+```
+
+### Find Mongo Credentials
+
+```bash
+grep -RIn "mongo.*user\|mongo.*password\|username\|password\|MONGO" .env config 2>/dev/null
+docker inspect mongo --format '{{range .Config.Env}}{{println .}}{{end}}'
+```
+
+Expected values:
+
+```text
+MONGO_INITDB_ROOT_USERNAME=root
+MONGO_INITDB_ROOT_PASSWORD=openIM123
+MONGO_INITDB_DATABASE=openim_v3
+MONGO_OPENIM_USERNAME=openIM
+MONGO_OPENIM_PASSWORD=openIM123
+```
+
+### Connect to MongoDB
+
+```bash
+docker exec -it mongo mongosh -u root -p 'openIM123' --authenticationDatabase admin
+```
+
+### Select the OpenIM Database
+
+Run these inside `mongosh`:
+
+```javascript
+show dbs
+use openim_v3
+show collections
+```
+
+Expected message-related collections:
+
+```text
+conversation
+msg
+seq
+seq_user
+```
+
+### Show Recent Message Buckets
+
+```javascript
+db.msg.find().sort({_id:-1}).limit(5).pretty()
+```
+
+OpenIM stores messages in bucket documents. A one-to-one chat bucket looks like:
+
+```text
+doc_id: "si_254712140013_5380285960:0"
+msgs: [
+  {
+    msg: {
+      send_id: "5380285960",
+      recv_id: "254712140013",
+      content: "{\"content\":\"Hello\"}",
+      seq: Long("1"),
+      status: 2
+    }
+  }
+]
+```
+
+### Query a Specific Conversation Bucket
+
+```javascript
+db.msg.find({
+  doc_id: "si_254712140013_5380285960:0"
+}).pretty()
+```
+
+### Search by Server or Client Message ID
+
+Use snake_case nested fields. These work because IDs are inside the `msgs` array:
+
+```javascript
+db.msg.find({
+  "msgs.msg.server_msg_id": "681364845a0e571af71a4c0f0644d4f4"
+}).pretty()
+```
+
+```javascript
+db.msg.find({
+  "msgs.msg.client_msg_id": "0d44d3ea6e19eae4433d3d94ca88630e"
+}).pretty()
+```
+
+### Search by Sender and Receiver
+
+```javascript
+db.msg.find({
+  "msgs.msg.send_id": "5380285960",
+  "msgs.msg.recv_id": "254712140013"
+}).pretty()
+```
+
+### Print Only Real Messages in a Clean Format
+
+This hides the empty placeholder slots where `msg` is `null`:
+
+```javascript
+db.msg.aggregate([
+  { $match: { doc_id: "si_254712140013_5380285960:0" } },
+  { $unwind: "$msgs" },
+  { $match: { "msgs.msg": { $ne: null } } },
+  { $project: {
+      _id: 0,
+      send_id: "$msgs.msg.send_id",
+      recv_id: "$msgs.msg.recv_id",
+      content: "$msgs.msg.content",
+      seq: "$msgs.msg.seq",
+      server_msg_id: "$msgs.msg.server_msg_id",
+      client_msg_id: "$msgs.msg.client_msg_id",
+      status: "$msgs.msg.status",
+      is_read: "$msgs.msg.is_read"
+  }}
+])
+```
+
+### Inspect Conversation Metadata
+
+```javascript
+db.conversation.find().limit(3).pretty()
+```
+
+If you need to search by a specific conversation, first inspect the field names from the output above, then query using those exact snake_case field names.
+
+### Important Notes
+
+- `status: 2` means OpenIM accepted/sent the message.
+- `is_read: false` means the stored message has not been marked read.
+- `offlinePushMsg failed` with `appid is invalid` is a push notification configuration issue, not a message storage failure.
+- Firebase will not show a `chats` collection in the active app flow. The Firebase chat service was removed so chat has a single source of truth: OpenIM.
+
+---
+
 ## 8. Configuration Files
 
 All config lives **inside** the `openim-chat` container at `/openim-chat/config/`:
@@ -436,6 +634,7 @@ curl -s -X POST http://localhost:10008/account/login \
 
 # Stop everything
 docker compose down
+```
 
 
 
@@ -481,9 +680,4 @@ docker compose up -d
 | Firebase Firestore | ✅ Yes |
 | OpenIM server | ❌ No |
 | OpenIM local SDK | ❌ No |
-
-
-
-```
-
 
