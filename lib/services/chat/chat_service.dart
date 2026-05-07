@@ -1,8 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter_openim_sdk/flutter_openim_sdk.dart'
-    hide MessageStatus;
+import 'package:flutter_openim_sdk/flutter_openim_sdk.dart' hide MessageStatus;
 
 import 'package:wrytte/models/chat_models/chat_conversation.dart';
 import 'package:wrytte/models/chat_models/chat_message.dart';
@@ -15,33 +14,28 @@ class ChatService {
 
   final AuthService _authService = AuthService.instance;
 
-  final _messageController =
-      StreamController<ChatMessage>.broadcast();
-  final _errorController =
-      StreamController<String>.broadcast();
-  final _connectionController =
-      StreamController<bool>.broadcast();
+  final _messageController = StreamController<ChatMessage>.broadcast();
+  final _errorController = StreamController<String>.broadcast();
+  final _connectionController = StreamController<bool>.broadcast();
   final _conversationsController =
       StreamController<List<ChatConversation>>.broadcast();
 
-  Stream<ChatMessage>            get messageStream       =>
-      _messageController.stream;
-  Stream<String>                 get errorStream         =>
-      _errorController.stream;
-  Stream<bool>                   get connectionStream    =>
-      _connectionController.stream;
+  Stream<ChatMessage> get messageStream => _messageController.stream;
+  Stream<String> get errorStream => _errorController.stream;
+  Stream<bool> get connectionStream => _connectionController.stream;
   Stream<List<ChatConversation>> get conversationsStream =>
       _conversationsController.stream;
 
   String? _currentUserId;
-  bool    _initialized = false;
-  bool    _isConnected = false;
+  bool _initialized = false;
+  bool _isConnected = false;
   Future<void>? _connectFuture;
 
   String? get currentUserId => _currentUserId;
+  bool get isConnected => _isConnected;
 
-  final Map<String, ChatConversation>  _conversationsMap = {};
-  final Map<String, List<ChatMessage>> _messagesCache    = {};
+  final Map<String, ChatConversation> _conversationsMap = {};
+  final Map<String, List<ChatMessage>> _messagesCache = {};
 
   Future<void> connect() async {
     if (_initialized && _isConnected) return;
@@ -119,16 +113,16 @@ class ChatService {
             debugPrint('[ChatService] New conversations: ${list.length}');
             _mergeOpenImConversations(list);
           },
-          onSyncServerStart: (_) =>
-              debugPrint('[ChatService] OpenIM sync started'),
+          onSyncServerStart:
+              (_) => debugPrint('[ChatService] OpenIM sync started'),
           onSyncServerFinish: (_) {
             debugPrint('[ChatService] OpenIM sync finished - refreshing');
             fetchConversations();
           },
-          onSyncServerFailed: (_) =>
-              debugPrint('[ChatService] OpenIM sync failed'),
-          onTotalUnreadMessageCountChanged: (int count) =>
-              debugPrint('[ChatService] Total unread: $count'),
+          onSyncServerFailed:
+              (_) => debugPrint('[ChatService] OpenIM sync failed'),
+          onTotalUnreadMessageCountChanged:
+              (int count) => debugPrint('[ChatService] Total unread: $count'),
         ),
       );
 
@@ -146,18 +140,7 @@ class ChatService {
   }
 
   Future<ChatMessage> sendMessage(ChatMessage message) async {
- 
-    // If not connected, wait up to 10s for connection to complete
-    if (!_isConnected) {
-      debugPrint('[ChatService] Not connected — waiting for connection...');
-      try {
-        await connectionStream
-            .firstWhere((connected) => connected == true)
-            .timeout(const Duration(seconds: 10));
-      } catch (_) {
-        throw Exception('ChatService not connected — timed out waiting');
-      }
-    }
+    await _ensureConnected();
 
     try {
       // Strip non-numeric characters so recvID is valid for OpenIM.
@@ -169,8 +152,9 @@ class ChatService {
         nickname: message.receiverId,
       );
 
-      final openImMsg = await OpenIM.iMManager.messageManager
-          .createTextMessage(text: message.content);
+      final openImMsg = await OpenIM.iMManager.messageManager.createTextMessage(
+        text: message.content,
+      );
 
       await OpenIM.iMManager.messageManager.sendMessage(
         message: openImMsg,
@@ -182,9 +166,9 @@ class ChatService {
         ),
       );
 
-     
       final sent = ChatMessage(
-        id: openImMsg.clientMsgID ??
+        id:
+            openImMsg.clientMsgID ??
             DateTime.now().millisecondsSinceEpoch.toString(),
         //conversationId: openImMsg.conversationID ?? '',
         conversationId: _deriveConvId(_currentUserId ?? '', openImReceiverId),
@@ -213,9 +197,9 @@ class ChatService {
     required String nickname,
   }) async {
     try {
-      final status = await OpenIM.iMManager
-          .getLoginStatus()
-          .timeout(const Duration(seconds: 3));
+      final status = await OpenIM.iMManager.getLoginStatus().timeout(
+        const Duration(seconds: 3),
+      );
 
       if (status == LoginStatus.logged && OpenIM.iMManager.userID == userId) {
         return;
@@ -236,9 +220,9 @@ class ChatService {
       imToken: token,
     );
 
-    final status = await OpenIM.iMManager
-        .getLoginStatus()
-        .timeout(const Duration(seconds: 5));
+    final status = await OpenIM.iMManager.getLoginStatus().timeout(
+      const Duration(seconds: 5),
+    );
     if (status != LoginStatus.logged || OpenIM.iMManager.userID != userId) {
       throw Exception('OpenIM login did not complete (status=$status)');
     }
@@ -250,7 +234,7 @@ class ChatService {
     required int durationSeconds,
     String senderName = 'New voice message',
   }) async {
-    if (!_isConnected) throw Exception('ChatService not connected');
+    await _ensureConnected();
 
     try {
       final openImReceiverId = _toOpenImUserId(receiverID);
@@ -288,7 +272,8 @@ class ChatService {
       final convId = _deriveConvId(_currentUserId ?? '', openImReceiverId);
 
       final local = ChatMessage(
-        id: openImMsg.clientMsgID ??
+        id:
+            openImMsg.clientMsgID ??
             DateTime.now().millisecondsSinceEpoch.toString(),
         conversationId: convId,
         senderId: _currentUserId ?? '',
@@ -317,8 +302,7 @@ class ChatService {
     int count = 40,
   }) async {
     try {
-      final AdvancedMessage result = await OpenIM
-          .iMManager.messageManager
+      final AdvancedMessage result = await OpenIM.iMManager.messageManager
           .getAdvancedHistoryMessageList(
             conversationID: conversationID,
             startMsg: startMsg,
@@ -334,8 +318,10 @@ class ChatService {
         }
       }
 
-      debugPrint('[ChatService] fetchMessageHistory: ${messages.length} '
-          'messages for conv $conversationID');
+      debugPrint(
+        '[ChatService] fetchMessageHistory: ${messages.length} '
+        'messages for conv $conversationID',
+      );
       return messages;
     } catch (e) {
       debugPrint('[ChatService] fetchMessageHistory error: $e');
@@ -343,28 +329,85 @@ class ChatService {
     }
   }
 
+  Future<void> ensureConversationForUser({
+    required String otherUserId,
+    String? displayName,
+    String? avatarUrl,
+  }) async {
+    final currentId = _currentUserId ?? await _authService.getCurrentUserId();
+    final openImOtherId = _toOpenImUserId(otherUserId);
+    if (currentId == null || currentId.isEmpty || openImOtherId.isEmpty) {
+      return;
+    }
+
+    final convId = _deriveConvId(currentId, openImOtherId);
+    _conversationsMap.putIfAbsent(
+      convId,
+      () => ChatConversation(
+        id: convId,
+        participants: [currentId, openImOtherId],
+        otherUserId: openImOtherId,
+        lastMessage: '',
+        lastMessageSenderId: '',
+        lastMessageTime: DateTime.now(),
+        otherUserName: displayName,
+        otherUserAvatar: avatarUrl,
+      ),
+    );
+    _emitConversations();
+
+    if (!_isConnected) {
+      unawaited(
+        connect().catchError((e) {
+          debugPrint('[ChatService] background connect failed: $e');
+        }),
+      );
+    }
+  }
+
   Future<void> fetchConversations({int offset = 0, int count = 100}) async {
     try {
       final List<ConversationInfo> convs = await OpenIM
-          .iMManager.conversationManager
+          .iMManager
+          .conversationManager
           .getConversationListSplit(offset: offset, count: count);
 
-      debugPrint('[ChatService] Loaded ${convs.length} conversations from '
-          'OpenIM local cache');
+      debugPrint(
+        '[ChatService] Loaded ${convs.length} conversations from '
+        'OpenIM local cache',
+      );
       _mergeOpenImConversations(convs);
     } catch (e) {
       debugPrint('[ChatService] fetchConversations error: $e');
     }
   }
 
+  Future<void> _ensureConnected() async {
+    if (_isConnected) return;
+
+    debugPrint('[ChatService] Not connected - connecting before send...');
+    await connect().timeout(const Duration(seconds: 20));
+
+    if (_isConnected) return;
+
+    try {
+      await connectionStream
+          .firstWhere((connected) => connected)
+          .timeout(const Duration(seconds: 10));
+    } catch (_) {
+      throw Exception('ChatService not connected - timed out waiting');
+    }
+  }
+
   Future<void> markConversationAsRead(String conversationId) async {
     try {
-      await OpenIM.iMManager.conversationManager
-          .markConversationMessageAsRead(conversationID: conversationId);
+      await OpenIM.iMManager.conversationManager.markConversationMessageAsRead(
+        conversationID: conversationId,
+      );
 
       if (_conversationsMap.containsKey(conversationId)) {
-        _conversationsMap[conversationId] =
-            _conversationsMap[conversationId]!.copyWith(unreadCount: 0);
+        _conversationsMap[conversationId] = _conversationsMap[conversationId]!
+            .copyWith(unreadCount: 0);
         _emitConversations();
       }
     } catch (e) {
@@ -373,8 +416,7 @@ class ChatService {
   }
 
   List<ChatMessage> getConversationMessages(String conversationId) {
-    final msgs =
-        List<ChatMessage>.from(_messagesCache[conversationId] ?? []);
+    final msgs = List<ChatMessage>.from(_messagesCache[conversationId] ?? []);
     msgs.sort((a, b) => a.timestamp.compareTo(b.timestamp));
     return msgs;
   }
@@ -393,7 +435,6 @@ class ChatService {
     }
   }
 
-
   //Before
   /*
 
@@ -406,7 +447,6 @@ class ChatService {
   }
 
   */
-
 
   Future<void> disconnect() async {
     if (!_isConnected) return;
@@ -435,9 +475,9 @@ class ChatService {
   }
 
   ChatMessage? _toChat(Message msg) {
-    final senderId   = msg.sendID ?? '';
+    final senderId = msg.sendID ?? '';
     final receiverId = msg.recvID ?? '';
-    final msgId      = msg.clientMsgID ?? msg.serverMsgID ?? '';
+    final msgId = msg.clientMsgID ?? msg.serverMsgID ?? '';
 
     if (senderId.isEmpty || msgId.isEmpty) return null;
 
@@ -445,9 +485,10 @@ class ChatService {
     //final convId = msg.conversationID ?? '';
     final convId = _deriveConvId(senderId, receiverId);
 
-    final timestamp = msg.sendTime != null
-        ? DateTime.fromMillisecondsSinceEpoch(msg.sendTime!)
-        : DateTime.now();
+    final timestamp =
+        msg.sendTime != null
+            ? DateTime.fromMillisecondsSinceEpoch(msg.sendTime!)
+            : DateTime.now();
 
     if (msg.contentType == 103 && msg.soundElem != null) {
       return ChatMessage(
@@ -476,12 +517,13 @@ class ChatService {
   }
 
   ChatConversation _toConversation(ConversationInfo conv) {
-    final convId  = conv.conversationID ?? '';
+    final convId = conv.conversationID ?? '';
     final otherId = conv.userID ?? '';
 
-    final lastTime = conv.latestMsgSendTime != null
-        ? DateTime.fromMillisecondsSinceEpoch(conv.latestMsgSendTime!)
-        : DateTime.now();
+    final lastTime =
+        conv.latestMsgSendTime != null
+            ? DateTime.fromMillisecondsSinceEpoch(conv.latestMsgSendTime!)
+            : DateTime.now();
 
     String lastMsgContent = conv.showName ?? '';
     try {
@@ -524,14 +566,15 @@ class ChatService {
     final convId = message.conversationId;
 
     if (_conversationsMap.containsKey(convId)) {
-      _conversationsMap[convId] =
-          _conversationsMap[convId]!.updateWithMessage(
-            message,
-            _currentUserId ?? '',
-          );
+      _conversationsMap[convId] = _conversationsMap[convId]!.updateWithMessage(
+        message,
+        _currentUserId ?? '',
+      );
     } else {
-      _conversationsMap[convId] =
-          ChatConversation.fromMessage(message, _currentUserId ?? '');
+      _conversationsMap[convId] = ChatConversation.fromMessage(
+        message,
+        _currentUserId ?? '',
+      );
     }
 
     _messagesCache.putIfAbsent(convId, () => []);
@@ -543,8 +586,9 @@ class ChatService {
   }
 
   void _emitConversations() {
-    final sorted = _conversationsMap.values.toList()
-      ..sort((a, b) => b.lastMessageTime.compareTo(a.lastMessageTime));
+    final sorted =
+        _conversationsMap.values.toList()
+          ..sort((a, b) => b.lastMessageTime.compareTo(a.lastMessageTime));
     _conversationsController.add(sorted);
   }
 
@@ -563,15 +607,19 @@ class ChatService {
   */
 
   String _toOpenImUserId(String id) {
-  return id.replaceAll(RegExp(r'[^\d]'), '');
+    return id.replaceAll(RegExp(r'[^\d]'), '');
   }
 
   MessageStatus _mapStatus(int? status) {
     switch (status) {
-      case 1:  return MessageStatus.sending;
-      case 2:  return MessageStatus.sent;
-      case 3:  return MessageStatus.failed;
-      default: return MessageStatus.sent;
+      case 1:
+        return MessageStatus.sending;
+      case 2:
+        return MessageStatus.sent;
+      case 3:
+        return MessageStatus.failed;
+      default:
+        return MessageStatus.sent;
     }
   }
 }

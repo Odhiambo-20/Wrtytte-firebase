@@ -3,6 +3,7 @@ import 'package:wrytte/components/contact_components/firebase_new_chat_item.dart
 import 'package:wrytte/models/contact_model.dart';
 import 'package:wrytte/models/user_models/user_profile_service.dart';
 import 'package:wrytte/services/auth/auth_service.dart';
+import 'package:wrytte/services/chat/chat_service.dart';
 import 'package:wrytte/services/contacts/contact_service.dart';
 import 'package:wrytte/ui/screens/chats/chat_screen.dart';
 import 'package:wrytte/ui/screens/new_contact_screen.dart';
@@ -55,11 +56,14 @@ class _FirebaseNewChatScreenState extends State<FirebaseNewChatScreen> {
   void _onSearchChanged() {
     final query = _searchController.text.toLowerCase();
     setState(() {
-      _filteredContacts = _allContacts
-          .where((c) =>
-              _sanitize(c.formattedName).toLowerCase().contains(query) ||
-              c.primaryPhone.contains(query))
-          .toList();
+      _filteredContacts =
+          _allContacts
+              .where(
+                (c) =>
+                    _sanitize(c.formattedName).toLowerCase().contains(query) ||
+                    c.primaryPhone.contains(query),
+              )
+              .toList();
     });
   }
 
@@ -74,12 +78,14 @@ class _FirebaseNewChatScreenState extends State<FirebaseNewChatScreen> {
       final currentUserId = await AuthService.instance.getCurrentUserId() ?? '';
 
       if (currentUserId.isNotEmpty) {
-        final firestoreContacts =
-            await _contactService.getFirestoreContactsCached(currentUserId);
+        final firestoreContacts = await _contactService
+            .getFirestoreContactsCached(currentUserId);
 
-        firestoreContacts.sort((a, b) => a.formattedName
-            .toLowerCase()
-            .compareTo(b.formattedName.toLowerCase()));
+        firestoreContacts.sort(
+          (a, b) => a.formattedName.toLowerCase().compareTo(
+            b.formattedName.toLowerCase(),
+          ),
+        );
 
         if (mounted) {
           setState(() {
@@ -98,8 +104,9 @@ class _FirebaseNewChatScreenState extends State<FirebaseNewChatScreen> {
 
       final currentUserId2 =
           await AuthService.instance.getCurrentUserId() ?? '';
-      final firestoreContacts =
-          await _contactService.getFirestoreContacts(currentUserId2);
+      final firestoreContacts = await _contactService.getFirestoreContacts(
+        currentUserId2,
+      );
 
       final seenPhones = <String>{};
       final merged = <Contact>[];
@@ -117,9 +124,11 @@ class _FirebaseNewChatScreenState extends State<FirebaseNewChatScreen> {
         }
       }
 
-      merged.sort((a, b) => a.formattedName
-          .toLowerCase()
-          .compareTo(b.formattedName.toLowerCase()));
+      merged.sort(
+        (a, b) => a.formattedName.toLowerCase().compareTo(
+          b.formattedName.toLowerCase(),
+        ),
+      );
 
       if (mounted) {
         setState(() {
@@ -156,18 +165,29 @@ class _FirebaseNewChatScreenState extends State<FirebaseNewChatScreen> {
     final ids = [currentUserId, normalizedReceiverId]..sort();
     final conversationId = 'si_${ids[0]}_${ids[1]}';
 
+    try {
+      await ChatService().ensureConversationForUser(
+        otherUserId: normalizedReceiverId,
+        displayName: _sanitize(contact.formattedName),
+        avatarUrl: contact.avatarUrl,
+      );
+    } catch (e) {
+      debugPrint('Create local conversation error: $e');
+    }
+
     if (!mounted) return;
     Navigator.pop(context);
     Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (_) => ChatScreen(
-          conversationId: conversationId,
-          receiverId: normalizedReceiverId,
-          currentUserId: currentUserId,
-          title: _sanitize(contact.formattedName),
-          avatarUrl: contact.avatarUrl,
-        ),
+        builder:
+            (_) => ChatScreen(
+              conversationId: conversationId,
+              receiverId: normalizedReceiverId,
+              currentUserId: currentUserId,
+              title: _sanitize(contact.formattedName),
+              avatarUrl: contact.avatarUrl,
+            ),
       ),
     );
   }
@@ -369,8 +389,7 @@ class _FirebaseNewChatScreenState extends State<FirebaseNewChatScreen> {
                     color: const Color(0xFF0F1013),
                     borderRadius: BorderRadius.circular(18),
                   ),
-                  child:
-                      const Icon(Icons.close, color: Colors.white, size: 20),
+                  child: const Icon(Icons.close, color: Colors.white, size: 20),
                 ),
               ),
               const Expanded(
@@ -454,12 +473,13 @@ class _FirebaseNewChatScreenState extends State<FirebaseNewChatScreen> {
               Navigator.push(
                 context,
                 MaterialPageRoute(
-                  builder: (_) => FutureBuilder<String?>(
-                    future: AuthService.instance.getToken(),
-                    builder: (context, snapshot) {
-                      return NewContactPage(token: snapshot.data ?? '');
-                    },
-                  ),
+                  builder:
+                      (_) => FutureBuilder<String?>(
+                        future: AuthService.instance.getToken(),
+                        builder: (context, snapshot) {
+                          return NewContactPage(token: snapshot.data ?? '');
+                        },
+                      ),
                 ),
               ).then((_) => _loadMyContacts());
             }

@@ -1,4 +1,4 @@
-import 'package:hive_flutter/hive_flutter.dart'; 
+import 'package:hive_flutter/hive_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:firebase_core/firebase_core.dart';
@@ -33,7 +33,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 const _systemBarColor = Colors.transparent;
 
 const _openImApiAddr = 'http://34.63.32.143:10002';
-const _openImWsAddr  = 'ws://34.63.32.143:10001';
+const _openImWsAddr = 'ws://34.63.32.143:10001';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -49,9 +49,9 @@ Future<void> main() async {
   );
 
   // ── Initialise OpenIM SDK ──────────────────────────────────────────────────
-  // fire-and-forget — does not block runApp()
-   _initOpenIM();
-  
+  // OpenIM must be ready before any auth/chat service tries to login.
+  await _initOpenIM();
+
   // ──────────────────────────────────────────────────────────────────────────
 
   await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
@@ -101,7 +101,9 @@ Future<void> _initOpenIM() async {
     ),
   );
 
-  debugPrint('[OpenIM] SDK init: ${success ? "OK" : "FAILED — check server address"}');
+  debugPrint(
+    '[OpenIM] SDK init: ${success ? "OK" : "FAILED — check server address"}',
+  );
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -116,13 +118,13 @@ class WrytteApp extends StatelessWidget {
       theme: WrytteTheme.lightTheme,
       home: const ThemeWrapper(child: AuthWrapper()),
       routes: {
-        '/auth_entry_screen':
-            (context) => const ThemeWrapper(child: AuthEntryScreen()),
+        '/auth_entry_screen': (context) =>
+            const ThemeWrapper(child: AuthEntryScreen()),
 
         '/phone_auth': (context) => const ThemeWrapper(child: PhoneAuthPage()),
 
-        '/virtual_phone':
-            (context) => const ThemeWrapper(child: VirtualNumberPage()),
+        '/virtual_phone': (context) =>
+            const ThemeWrapper(child: VirtualNumberPage()),
 
         '/sign_in': (context) => const ThemeWrapper(child: SignInPage()),
 
@@ -165,15 +167,14 @@ class WrytteApp extends StatelessWidget {
         },
 
         //'/add_profile':
-            //(context) => const ThemeWrapper(child: AddProfilePage()),
-
-        '/add_profile':
-           (context) => const ThemeWrapper(child: AddProfilePage(isNewUser: true)),
+        //(context) => const ThemeWrapper(child: AddProfilePage()),
+        '/add_profile': (context) =>
+            const ThemeWrapper(child: AddProfilePage(isNewUser: true)),
 
         '/home': (context) => const ThemeWrapper(child: AuthWrapper()),
 
-        'terms_privacy':
-            (context) => const ThemeWrapper(child: TermsPrivacyPage()),
+        'terms_privacy': (context) =>
+            const ThemeWrapper(child: TermsPrivacyPage()),
       },
     );
   }
@@ -199,9 +200,9 @@ class AuthWrapper extends StatefulWidget {
 }
 
 class _AuthWrapperState extends State<AuthWrapper> {
-  bool _checking = true;   // true while reading secure storage
+  bool _checking = true; // true while reading secure storage
   bool _isLoggedIn = false;
-  bool _needsProfile = false; 
+  bool _needsProfile = false;
   String? _currentUserId;
 
   final CallListenerService _callListener = CallListenerService();
@@ -239,7 +240,8 @@ class _AuthWrapperState extends State<AuthWrapper> {
             .timeout(const Duration(seconds: 6));
 
         final name = doc.data()?['name'] as String? ?? '';
-        final needsProfile = name.isEmpty ||
+        final needsProfile =
+            name.isEmpty ||
             name.trim().length < 2 ||
             _looksLikePhone(name.trim());
 
@@ -264,7 +266,10 @@ class _AuthWrapperState extends State<AuthWrapper> {
     } catch (e) {
       debugPrint('[AuthWrapper] Session check error: $e');
       if (mounted) {
-        setState(() { _isLoggedIn = false; _checking = false; });
+        setState(() {
+          _isLoggedIn = false;
+          _checking = false;
+        });
       }
       FlutterNativeSplash.remove();
     }
@@ -285,17 +290,17 @@ class _AuthWrapperState extends State<AuthWrapper> {
   Future<void> _initServicesInBackground({
     required String userId,
     String nickname = '',
-    String faceUrl  = '',
+    String faceUrl = '',
   }) async {
     // Re-connect OpenIM SDK using the saved imToken before ChatService starts
     // listening/fetching, otherwise conversations can initialize while logged out.
     try {
       final imToken = await AuthService.instance.getOpenImToken();
       await AuthService.instance.loginToOpenIM(
-        userId:   userId,
+        userId: userId,
         nickname: nickname.isNotEmpty ? nickname : userId,
-        faceUrl:  faceUrl,
-        imToken:  imToken ?? '',
+        faceUrl: faceUrl,
+        imToken: imToken ?? '',
       );
     } catch (e) {
       debugPrint('[AuthWrapper] OpenIM login error: $e');
@@ -315,22 +320,21 @@ class _AuthWrapperState extends State<AuthWrapper> {
   }
 
   @override
-    Widget build(BuildContext context) {
-      if (_checking) {
-        return const Scaffold(
-          backgroundColor: Color(0xFF08090B),
-          body: SizedBox.shrink(),
-        );
-      }
+  Widget build(BuildContext context) {
+    if (_checking) {
+      return const Scaffold(
+        backgroundColor: Color(0xFF08090B),
+        body: SizedBox.shrink(),
+      );
+    }
 
-      if (!_isLoggedIn) return const AuthEntryScreen();
+    if (!_isLoggedIn) return const AuthEntryScreen();
 
-      // ✅ Send to profile page if name is missing or is a phone number
-      if (_needsProfile) {
-        return const AddProfilePage(isNewUser: false);
-      }
+    // ✅ Send to profile page if name is missing or is a phone number
+    if (_needsProfile) {
+      return const AddProfilePage(isNewUser: false);
+    }
 
     return HomeScreen(currentUserId: _currentUserId!);
- }
+  }
 }
-
