@@ -44,7 +44,7 @@ class ChatService {
   final Map<String, List<ChatMessage>> _messagesCache    = {};
 
   Future<void> connect() async {
-    if (_initialized) return;
+    if (_initialized && _isConnected) return;
     if (_connectFuture != null) return _connectFuture!;
 
     _connectFuture = _connect();
@@ -182,12 +182,12 @@ class ChatService {
         ),
       );
 
-      final convId = _deriveConvId(_currentUserId ?? '', openImReceiverId);
-
+     
       final sent = ChatMessage(
         id: openImMsg.clientMsgID ??
             DateTime.now().millisecondsSinceEpoch.toString(),
-        conversationId: convId,
+        //conversationId: openImMsg.conversationID ?? '',
+        conversationId: _deriveConvId(_currentUserId ?? '', openImReceiverId),
         senderId: _currentUserId ?? '',
         receiverId: openImReceiverId,
         content: message.content,
@@ -441,6 +441,8 @@ class ChatService {
 
     if (senderId.isEmpty || msgId.isEmpty) return null;
 
+    //final convId = _deriveConvId(senderId, receiverId);
+    //final convId = msg.conversationID ?? '';
     final convId = _deriveConvId(senderId, receiverId);
 
     final timestamp = msg.sendTime != null
